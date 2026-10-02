@@ -1,0 +1,36 @@
+# Case material and anything derived from it (contains PII) - never commit
+data/
+outputs/
+labels/
+*.pdf
+*.docx
+*.pptx
+*.xlsx
+*.png
+*.jpg
+*.emf
+!tests/fixtures/synthetic/**
+!docs/img/**
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Model weights and caches
+models/
+.cache/
+*.bin
+*.safetensors
+*.onnx
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
