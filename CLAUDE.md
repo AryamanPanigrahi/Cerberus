@@ -185,7 +185,7 @@ cerberus/
 ## 9. Current status and next steps
 
 - [x] Repo created (private), .gitignore in place, cloned locally.
-- [ ] nbstripout installed and active; folder skeleton created.
+- [x] nbstripout installed and active; folder skeleton created.
 - [ ] Extraction stage for all three formats into the block IR, with provenance and per-page OCR reporting (E.6 #1).
 - [ ] Structure-retention metric.
 - [ ] Rule detectors with validators, then GLiNER/NER, dictionary sweep, merge, allowlist.
