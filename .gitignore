@@ -12,6 +12,9 @@ labels/
 !tests/fixtures/synthetic/**
 !docs/img/**
 
+# Local reference notes (may carry case context) - never commit
+notes/
+
 # Python
 __pycache__/
 *.py[cod]
