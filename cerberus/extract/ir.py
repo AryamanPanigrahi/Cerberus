@@ -24,6 +24,7 @@ class BlockType(str, Enum):
     TABLE = "table"
     TABLE_CELL = "table_cell"
     SLIDE = "slide"
+    GROUP = "group"  # shapes that belong together, e.g. one org-chart card
     TEXT_BOX = "text_box"
     IMAGE_REGION = "image_region"
     HEADER = "header"
