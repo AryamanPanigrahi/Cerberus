@@ -23,11 +23,11 @@ Working style the owner wants:
 4. Notebooks must have outputs stripped before commit (`pip install nbstripout` then `nbstripout --install` in the repo; verify it is active before the first notebook commit). Printed extracted text in a notebook cell is a leak.
 5. Keep "Optiv" and "Cadence" out of code identifiers, module names and the README. Configs specific to the case can live in a gitignored local config. Before the repo goes public, this CLAUDE.md must be rewritten without case context.
 6. The repo is private. It must not be made public before the recruitment process ends.
-7. **Claude must not read, open, parse or run code against anything in `data/`, `outputs/` or `labels/`.** This holds until Optiv confirms whether case materials may be shared with AI tools; a question is pending. `.claude/settings.json` denies Read/Edit on these paths, but that does not stop scripts. So:
-   - Never run the pipeline, tests or any script on files in those folders.
-   - Never `cat`, `type`, `head` or print their contents.
-   - Develop and test only against synthetic documents in `tests/fixtures/synthetic/` that reproduce the traps described in §4 by format, not by value.
-   - Aryaman runs the pipeline on the real files himself and shares only aggregate results (counts, precision/recall) back. When a real-file run is needed, give him the exact command to run instead of running it.
+7. **Claude may read and run code against `data/`, `outputs/` and `labels/`** (Optiv confirmed AI-assisted development on 5 October 2026; Aryaman confirmed this covers Claude reading the case files directly). The limits:
+   - Case data is only ever read locally. Rules 1–3 still apply: nothing from those folders is committed, and the pipeline itself sends no document content to any cloud API.
+   - No real values in committed files, commit messages or `notes/`. Report results from real-file runs as counts, types and locations.
+   - Anything committed as a demo or test fixture uses made-up values in `tests/fixtures/synthetic/`, reproducing the traps in §4 by format, not by value.
+   - Pipeline outputs from real files go to `outputs/` only.
 
 ## 3. The brief (Case Study 2)
 
