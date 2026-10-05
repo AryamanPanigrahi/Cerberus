@@ -135,6 +135,8 @@ Principles:
 - **Stable pseudonymization tokens**: the same individual gets the same token in every file, so the downstream LLM can still reason about who did what. The token→value mapping stays local and is never logged in committed files.
 - **False-positive controls**: Luhn for card numbers; PESEL checksum and embedded-date validity; PAN structure (`AAAAA9999A`, 4th character = holder type, `P` for individuals); SSN structure, accepting the 900- test range but flagging it; context keywords for partial identifiers; an allowlist of org names, product names, job titles and field labels.
 - Image regions: OCR each image and map text back to pixel boxes for masking. Badge photos and barcodes are masked as whole regions.
+- **Masked derivatives rewrite metadata.** DOCX/PPTX: core properties set to tokens or cleared. PDF: info dictionary cleared, XMP deleted, saved non-incrementally with `garbage=4` (an incremental save appends changes and leaves the original objects recoverable). Extractors emit metadata as blocks so it is detected like any other text.
+- **Verification pass.** Every output (redacted text and each masked derivative, metadata included) is re-extracted and re-scanned after redaction. If any PII remains, the output is withheld and the run fails: fail closed.
 
 Suggested stack (confirm before adding dependencies):
 - Python 3.11.
@@ -186,10 +188,12 @@ cerberus/
 
 - [x] Repo created (private), .gitignore in place, cloned locally.
 - [x] nbstripout installed and active; folder skeleton created.
-- [ ] Extraction stage for all three formats into the block IR, with provenance and per-page OCR reporting (E.6 #1).
+- [x] Block IR; PPTX and DOCX extractors (native text, tables, hidden text; images recorded, not yet OCR'd).
+- [ ] PDF extractor and OCR stage (also fills image regions in PPTX/DOCX), with per-page OCR reporting (E.6 #1).
 - [ ] Structure-retention metric.
 - [ ] Rule detectors with validators, then GLiNER/NER, dictionary sweep, merge, allowlist.
-- [ ] Tokenizer, redaction for text and each original format.
+- [ ] Tokenizer, redaction for text and each original format, including metadata rewrite.
+- [ ] Verification pass: re-scan every output including metadata; fail closed on any residual PII.
 - [ ] Audit log and per-file summary.
 - [ ] Ground-truth labels and evaluation (teammates may do the labelling).
 - [ ] Demo notebook / UI.
