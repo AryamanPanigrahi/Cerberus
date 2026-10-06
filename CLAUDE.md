@@ -206,7 +206,8 @@ cerberus/
 - [x] PDF tables: pixel evidence added. A dark header band plus ruled lines marks out the table and its rows; single-row strips are merged and bridged columns split. On the sample, 59 of 67 detected tables have a clean header row.
 - [ ] PDF tables, remaining: tables continuing across a page break (no header band on the second page), two adjacent prose columns merged, cell text on coloured badges not read by OCR.
 - [x] OCR for pictures in PPTX, DOCX and typed PDF pages (`images.py`): read once per distinct picture, EMF/WMF/SVG converted through LibreOffice, enlargement chosen from measured text height, lines emitted as image content. Unopenable or low-confidence pictures are quarantined. Extraction now covers every channel in all three formats.
-- [ ] Structure-retention metric.
+- [x] Structure-retention metric (`cerberus/eval/structure.py`): scores extraction against hand-corrected reference files in `labels/structure/` (a small Markdown dialect, one element per line). Export a page, correct it by eye, delete the word UNCHECKED, score. Reports the retained share, the reasons for losses, and character accuracy; text inside pictures is scored separately.
+- [ ] Structure references: a person must correct exported pages for a sample of each file (suggest 8 to 10 PDF pages including 18, 22, 25, 28 and 30; 3 slides; 2 DOCX sections). Only page 25 exists so far, checked by Claude as a tool demonstration: 95.2% retained, 99.9% character accuracy.
 - [ ] Rule detectors with validators, then GLiNER/NER, dictionary sweep, merge, allowlist.
 - [ ] Tokenizer, redaction for text and each original format, including metadata rewrite.
 - [ ] Verification pass: re-scan every output including metadata, plus raw-content search for token-map values; fail closed on any residual PII.

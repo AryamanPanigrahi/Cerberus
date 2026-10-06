@@ -196,16 +196,29 @@ def _measure(lines: list[Line]) -> _Scale:
         for a, b in zip(line.words, line.words[1:])
         if 0 < b.x0 - a.x1 < 2 * height
     ]
-    pitches = [
+    space = median(gaps) if gaps else 0.3 * height
+    # Line pitch is measured on running text only: wide lines with no column
+    # gaps, whatever their size. Table rows are spaced wider than the lines of
+    # a paragraph, and on a page that is mostly tables they would push the
+    # figure up until separate paragraphs looked like one. The lower quartile
+    # is used because the gaps between paragraphs are in the sample too.
+    cell_gap = max(3 * space, 0.9 * height)
+    widest = max(line.x1 - line.x0 for line in lines)
+    prose = {
+        id(line)
+        for line in lines
+        if len(line.segments(cell_gap)) == 1 and line.x1 - line.x0 >= 0.6 * widest
+    }
+    pitches = sorted(
         b.top - a.top
         for a, b in zip(lines, lines[1:])
-        if id(a) in is_body and id(b) in is_body and 0.8 * height < b.top - a.top < 3 * height
-    ]
+        if id(a) in prose and id(b) in prose and 0.8 * height < b.top - a.top < 3 * height
+    )
     return _Scale(
         height=height,
-        space=median(gaps) if gaps else 0.3 * height,
+        space=space,
         cap=median(c for c, line in sized if id(line) in is_body),
-        pitch=median(pitches) if len(pitches) >= 3 else 1.9 * height,
+        pitch=pitches[len(pitches) // 4] if len(pitches) >= 3 else 1.9 * height,
     )
 
 

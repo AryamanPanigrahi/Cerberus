@@ -158,3 +158,15 @@ def test_words_that_line_up_inside_a_cell_do_not_split_it():
     ]
     words = [w for key, (text_by_x, y) in enumerate(rows) for w in line(text_by_x, y, key)]
     assert table_of(words)[1] == ["Tier 1 Critical", "Quarterly"]
+
+
+def test_paragraphs_stay_separate_on_a_page_that_is_mostly_tables():
+    prose = "Each provider supplies a named roster every quarter and keeps it current"
+    rows = [({100: prose}, 100), ({100: prose}, 136),  # first paragraph
+            ({100: prose}, 186), ({100: prose}, 222)]  # second, after a paragraph gap
+    rows += [({110: "NAME", 400: "VENDOR ID", 650: "LOCATION"}, 300)]
+    rows += [({110: f"Person {i}", 400: f"VND-0000{i}", 650: "Springfield"}, 352 + 52 * i) for i in range(8)]
+    words = [w for key, (text_by_x, y) in enumerate(rows) for w in line(text_by_x, y, key)]
+    kinds = [r.kind if isinstance(r, layout.TextRegion) else "table"
+             for r in layout.analyse(layout.build_lines(words))]
+    assert kinds == ["paragraph", "paragraph", "table"]
