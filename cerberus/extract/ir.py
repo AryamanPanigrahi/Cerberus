@@ -95,6 +95,7 @@ class Block:
     col: int | None = None
     header_id: str | None = None  # the column-header cell this cell sits under
     section_path: tuple[str, ...] = ()  # enclosing headings, outermost first
+    quarantined: bool = False  # unreliable: report its findings, mask it whole, keep it from downstream
 
     def span_boxes(self, start: int, end: int) -> list[BBox]:
         """Boxes of every word overlapping text[start:end]."""

@@ -112,6 +112,17 @@ Metric: of the structural elements in the source (headings, paragraphs, list ite
 - There are **near-miss surnames** across files: same surname with different first names, and hyphenated variants of a surname that appears in another file.
 - Cross-artifact token linking must therefore match on full normalized names (plus email/ID evidence), **never surname alone**.
 
+### 4.5 Hidden channels (inspected 6 Oct 2026; record findings as types and counts, never values)
+- **File metadata holds real names in all three files.** These are not synthetic: they are Optiv staff, with an "[OC]" prefix, and one of them is the evaluator who answered our questions.
+  - DOCX: core-properties creator and last-modified-by (two different people), plus a last-printed date.
+  - PPTX: creator and last-modified-by (one person).
+  - PDF: Author, stored twice, in the info dictionary and in XMP `dc:creator`.
+- DOCX `word/settings.xml` holds docVars with commercial tags (statement-of-work and pricing labels). Not PII, but scrub them in the masked derivative as general hygiene.
+- PPTX picture alt text holds a leftover local file path from the tool that generated the deck. Not PII; scrub it.
+- DOCX picture alt text is auto-generated ("A screenshot of a computer…"). No PII.
+- PPTX speaker notes contain only slide numbers. No comments, tracked changes, hidden text or embedded objects in any file.
+- The metadata names never appear in the visible text, so only the metadata channel exposes them. Never show the real names in the deck: show tokens.
+
 ## 5. Architecture decisions (agreed)
 
 ```
@@ -134,9 +145,9 @@ Principles:
 - **Generative LLMs never produce spans directly.** Any span proposed by a local LLM must be verified to exist verbatim in the source text before it is accepted.
 - **Stable pseudonymization tokens**: the same individual gets the same token in every file, so the downstream LLM can still reason about who did what. The token→value mapping stays local and is never logged in committed files.
 - **False-positive controls**: Luhn for card numbers; PESEL checksum and embedded-date validity; PAN structure (`AAAAA9999A`, 4th character = holder type, `P` for individuals); SSN structure, accepting the 900- test range but flagging it; context keywords for partial identifiers; an allowlist of org names, product names, job titles and field labels.
-- Image regions: OCR each image and map text back to pixel boxes for masking. Badge photos and barcodes are masked as whole regions.
+- Image regions: OCR each image and map text back to pixel boxes. **Every figure is masked as a whole region** in the masked derivative (decided 6 Oct 2026), and text read inside a figure is used for detection and the audit report only, never passed downstream. Reason: figure OCR is too noisy to trust span-level masking. Revisit if a neural OCR engine is adopted for figures.
 - **Masked derivatives rewrite metadata.** DOCX/PPTX: core properties set to tokens or cleared. PDF: info dictionary cleared, XMP deleted, saved non-incrementally with `garbage=4` (an incremental save appends changes and leaves the original objects recoverable). Extractors emit metadata as blocks so it is detected like any other text.
-- **Verification pass.** Every output (redacted text and each masked derivative, metadata included) is re-extracted and re-scanned after redaction. If any PII remains, the output is withheld and the run fails: fail closed.
+- **Verification pass.** Every output (redacted text and each masked derivative, metadata included) is re-extracted and re-scanned after redaction. If any PII remains, the output is withheld and the run fails: fail closed. The pass has two independent checks, both run by the pipeline itself: (1) re-run extraction and the detectors on the output; (2) search the output's raw contents (every part inside a DOCX/PPTX zip, every decoded PDF stream, plus metadata) for each original value held in the local token map. Check 2 catches a value left in a part of the file the extractor does not walk. Tokens such as `<PERSON_3>` are recognised and not flagged.
 
 Suggested stack (confirm before adding dependencies):
 - Python 3.11.
@@ -189,11 +200,15 @@ cerberus/
 - [x] Repo created (private), .gitignore in place, cloned locally.
 - [x] nbstripout installed and active; folder skeleton created.
 - [x] Block IR; PPTX and DOCX extractors (native text, tables, hidden text; images recorded, not yet OCR'd).
-- [ ] PDF extractor and OCR stage (also fills image regions in PPTX/DOCX), with per-page OCR reporting (E.6 #1).
+- [x] PDF extractor: per-page native/OCR routing and OCR report (E.6 #1), layout analysis (headings, paragraphs, lists, tables from word positions), running headers/footers, metadata.
+- [x] PDF figures: framed figures detected from pixels (13 of 13 in the sample), cut out at native scan resolution, enlarged and re-OCR'd as `image_region` blocks with per-line child blocks (container = image). A figure below the confidence threshold is quarantined (`Block.quarantined`): mask whole, keep from downstream.
+- [ ] Figure OCR quality: Tesseract cannot read 3 of the 13 sample figures (two UI/terminal screenshots and a chart) and reads the rest with noise. Decided: mask every figure whole for now. Later, evaluate a neural OCR engine (PaddleOCR or docTR) for figures only, to improve the audit report and image-only recall.
+- [ ] PDF tables: fix merged/split columns and unmerged wrapped rows on complex tables (try header-band and ruled-line evidence from pixels).
+- [ ] OCR for image regions in PPTX/DOCX, including EMF conversion.
 - [ ] Structure-retention metric.
 - [ ] Rule detectors with validators, then GLiNER/NER, dictionary sweep, merge, allowlist.
 - [ ] Tokenizer, redaction for text and each original format, including metadata rewrite.
-- [ ] Verification pass: re-scan every output including metadata; fail closed on any residual PII.
+- [ ] Verification pass: re-scan every output including metadata, plus raw-content search for token-map values; fail closed on any residual PII.
 - [ ] Audit log and per-file summary.
 - [ ] Ground-truth labels and evaluation (teammates may do the labelling).
 - [ ] Demo notebook / UI.

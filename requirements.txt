@@ -1,2 +1,5 @@
 python-pptx
 python-docx
+pymupdf
+pytesseract
+numpy
