@@ -516,12 +516,13 @@ def compose(words: list[OcrWord]) -> tuple[str, list[tuple[int, int, OcrWord]]]:
     """Join OCR words into block text, returning each word's character span in it.
 
     Words are separated by one space. A word broken by a hyphen at a line end
-    is rejoined; the wrap shows as the next word starting further left.
+    is rejoined; the wrap shows as the next word starting below the previous one
+    (in a narrow table cell both can start at the same x, so x is not the test).
     """
     text, spans = "", []
     for previous, word in zip([None, *words], words):
         if previous is not None:
-            wrapped = word.x0 < previous.x0
+            wrapped = word.y0 > (previous.y0 + previous.y1) / 2
             if not (wrapped and previous.text.endswith("-") and len(previous.text) > 1):
                 text += " "
         spans.append((len(text), len(text) + len(word.text), word))
