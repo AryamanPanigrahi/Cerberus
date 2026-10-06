@@ -20,7 +20,8 @@ from collections import Counter
 from html import escape
 from pathlib import Path
 
-from ..detect import rules
+from .. import detect as detection
+from ..detect import ner
 from ..detect.finding import Finding
 from ..extract import extract
 from ..extract.ir import Block, BlockType, Document
@@ -29,7 +30,7 @@ _SUPPORTED = {".pdf", ".docx", ".pptx"}
 _COLOURS = {
     "EMAIL": "#cfe8ff", "PHONE": "#d9f2d9", "STAFF_ID": "#ffe4b3", "SSN": "#ffc9c9",
     "TAX_ID": "#ffc9c9", "CARD": "#ffc9c9", "PAN": "#f3d1ff", "PESEL": "#f3d1ff",
-    "PASSPORT": "#f3d1ff", "DOB": "#fff3a8",
+    "PASSPORT": "#f3d1ff", "DOB": "#fff3a8", "PERSON": "#ffd6e7", "ADDRESS": "#d6f5f0",
 }
 _STYLE = """
 body{font:15px/1.5 system-ui,Segoe UI,sans-serif;margin:0;color:#1c2330;background:#f5f6f8}
@@ -55,7 +56,8 @@ mark{padding:0 2px;border-radius:3px} mark sub{font-size:9px;color:#444;margin-l
 def build(paths: list[Path], out: Path) -> list[Path]:
     """Extract and scan the files together, then write one page each plus an index."""
     docs = [extract(path) for path in paths]
-    findings = rules.detect(docs)
+    # Names need the local model; without it the preview still shows the rule findings.
+    findings = detection.detect(docs, use_ner=Path(ner.MODEL_PATH).is_dir())
     out.mkdir(parents=True, exist_ok=True)
     written = []
     for doc in docs:
@@ -118,14 +120,16 @@ def _summary(doc: Document, findings: list[Finding]) -> str:
     if pictures:
         rows.append(("Pictures", f"{len(pictures)}, of which {sum(b.quarantined for b in pictures)} quarantined"))
     rows.append(("Structure", ", ".join(f"{count} {kind}" for kind, count in kinds.most_common())))
-    rows.append(("Findings (rule detector only; names not yet detected)", str(len(findings))))
+    by_detector = Counter(f.detector for f in findings)
+    detail = ", ".join(f"{count} from {name}" for name, count in sorted(by_detector.items()))
+    rows.append(("Findings", f"{len(findings)} ({detail})" if findings else "0"))
     body = "".join(f"<tr><th>{escape(k)}</th><td>{escape(v)}</td></tr>" for k, v in rows)
     return f"<h2>Summary</h2><table>{body}</table>"
 
 
 def _finding_tables(findings: list[Finding]) -> str:
     if not findings:
-        return "<h2>Findings</h2><p class=note>None from the rule detector.</p>"
+        return "<h2>Findings</h2><p class=note>None.</p>"
     locations = ("body", "table", "prose", "image")
     counts: dict[str, Counter] = {}
     for f in findings:
@@ -140,14 +144,14 @@ def _finding_tables(findings: list[Finding]) -> str:
     )
     listing = "".join(
         f"<tr><td class=num>{f.page or ''}</td><td>{f.location}</td><td>{f.entity}</td>"
-        f"<td>{escape(f.subtype)}</td><td>{escape(f.text)}</td><td>{f.rule}</td>"
+        f"<td>{escape(f.subtype)}</td><td>{escape(f.text)}</td><td>{f.detector}</td><td>{escape(f.rule)}</td>"
         f"<td class=num>{f.confidence:.2f}</td><td>{escape(', '.join(f.flags))}</td></tr>"
         for f in findings
     )
     return (
         f"<h2>Findings by entity and location</h2><table><tr><th>Entity</th><th>Total</th>{head}</tr>{rows}</table>"
         f"<details><summary>All {len(findings)} findings, one per row</summary><table><tr><th>Page</th>"
-        f"<th>Location</th><th>Entity</th><th>Subtype</th><th>Value</th><th>Rule</th><th>Confidence</th>"
+        f"<th>Location</th><th>Entity</th><th>Subtype</th><th>Value</th><th>Detector</th><th>Rule or model</th><th>Confidence</th>"
         f"<th>Flags</th></tr>{listing}</table></details>"
     )
 

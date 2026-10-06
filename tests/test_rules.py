@@ -127,7 +127,7 @@ def roster() -> Document:
                            parent_id=table.block_id, row=r, col=c, header_id=headers.get(c))
             if r == 0:
                 headers[c] = cell.block_id
-    doc.add(BlockType.PARAGRAPH, "Risk RSK-4488 was raised after VND-PL-0002 kept access for 34 days.")
+    doc.add(BlockType.PARAGRAPH, "Risk REF-4488 was raised after VND-PL-0002 kept access for 34 days.")
     doc.add(BlockType.PARAGRAPH, "Lee Specimen (DRT-0042) and Kim Dummy (DRT-0043) and Pat Proxy (DRT-0044) approved.")
     return doc
 
@@ -140,7 +140,7 @@ def test_staff_prefixes_are_learned_from_labels_and_names_then_applied_everywher
         "VND-IN-0001", "VND-PL-0002", "VND-IN-0003", "VND-PL-0002", "DRT-0042", "DRT-0043", "DRT-0044",
     ]
     # The risk reference has the same shape but was never seen identifying a person.
-    assert "RSK-4488" not in [f.text for f in rules.detect([doc])]
+    assert "REF-4488" not in [f.text for f in rules.detect([doc])]
     # In the table the column header vouches for it; in the sentence nothing does.
     assert [f.confidence for f in ids[:4]] == [0.9, 0.9, 0.9, 0.8]
 
@@ -183,10 +183,10 @@ def test_overlapping_matches_resolve_to_the_surest():
 
 
 @pytest.mark.parametrize("text", [
-    "Version 6.0 of GRP-POL-001 applies from 30/06/2026.",
-    "Ticket INC-2026-0417 and control CTL-IAM-04 are referenced in section 16.5.",
-    "Primary vendor contact and Email ID of vendor POC are mandatory attributes.",
-    "The limit is USD 100,000 for 12 months; 1,840 items were delayed.",
+    "Version 2.0 of DOC-STD-001 applies from 30/06/2030.",
+    "Ticket TKT-2030-0001 and control CTL-ABC-01 are referenced in section 9.9.",
+    "Primary supplier contact and Email ID of supplier lead are mandatory attributes.",
+    "The limit is USD 100,000 for 12 months; 1,234 items were delayed.",
 ])
 def test_lookalikes_are_left_alone(text):
     assert found(text) == []

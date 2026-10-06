@@ -3,3 +3,8 @@ python-docx
 pymupdf
 pytesseract
 numpy
+# Name and address detection. Install the CPU build of torch first, or pip
+# pulls a much larger GPU build:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch
+gliner

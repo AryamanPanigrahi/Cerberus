@@ -234,7 +234,7 @@ _SEED_PREFIXES = frozenset({"EMP", "EMPL", "EID", "STAFF"})  # generic English, 
 def learn_staff_prefixes(docs: list[Document]) -> frozenset[str]:
     """Which code prefixes identify people in this set of documents.
 
-    "EMP-12345" and "RSK-4488" have the same shape; only one is a person. The
+    "EMP-12345" and "REF-4488" have the same shape; only one is a person. The
     documents themselves say which: a code under a column headed "Emp ID" or
     "Vendor ID", or in brackets straight after a name, is a person's. Prefixes
     seen there are learned and then recognised everywhere, including in prose
