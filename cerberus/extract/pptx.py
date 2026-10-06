@@ -24,6 +24,7 @@ from pptx.shapes.graphfrm import GraphicFrame
 from pptx.shapes.group import GroupShape
 from pptx.shapes.picture import Picture
 
+from . import images
 from .ir import BBox, Block, BlockType, Container, Document, Page, Unit, doc_id_from_bytes
 
 # File properties that can name a person; they travel with the file invisibly.
@@ -71,6 +72,7 @@ def extract_pptx(path: str | Path) -> Document:
         if value:
             doc.add(BlockType.METADATA, value, native_ref={"core_property": name})
 
+    reader = images.Reader()  # one per deck, so a logo on every slide is read once
     # Rows or columns overlapping by less than this still count as separate.
     tolerance = (prs.slide_width / 200, prs.slide_height / 200)
 
@@ -90,7 +92,7 @@ def extract_pptx(path: str | Path) -> Document:
         )
         fonts: dict[str, float] = {}
         for node in _reading_order(_nest(nodes), tolerance):
-            _emit(doc, node, slide_block.block_id, number, tolerance, fonts)
+            _emit(doc, node, slide_block.block_id, number, tolerance, fonts, reader)
 
         if slide.has_notes_slide and slide.notes_slide.notes_text_frame is not None:
             notes = _frame_text(slide.notes_slide.notes_text_frame)
@@ -200,7 +202,7 @@ def _split(nodes: list[_Node], lo: str, hi: str, tol: float) -> list[list[_Node]
     return parts
 
 
-def _emit(doc: Document, node: _Node, parent_id: str, page: int, tolerance, fonts) -> None:
+def _emit(doc: Document, node: _Node, parent_id: str, page: int, tolerance, fonts, reader) -> None:
     s = node.shape
     common = dict(
         parent_id=parent_id,
@@ -212,7 +214,7 @@ def _emit(doc: Document, node: _Node, parent_id: str, page: int, tolerance, font
     if node.children:  # an explicit group, or a frame that encloses other shapes
         group = doc.add(BlockType.GROUP, **common)
         for child in _reading_order(node.children, tolerance):
-            _emit(doc, child, group.block_id, page, tolerance, fonts)
+            _emit(doc, child, group.block_id, page, tolerance, fonts, reader)
 
     elif node.kind == "text":
         block = doc.add(BlockType.TEXT_BOX, _frame_text(s.text_frame), **common)
@@ -235,8 +237,10 @@ def _emit(doc: Document, node: _Node, parent_id: str, page: int, tolerance, font
 
     elif node.kind == "picture":
         ref = dict(common["native_ref"])
+        picture = None
         try:
-            ref.update(sha1=s.image.sha1, content_type=s.image.content_type)
+            picture = s.image
+            ref.update(sha1=picture.sha1, content_type=picture.content_type)
         except ValueError:  # linked, not embedded: no bytes in the file to OCR
             ref.update(linked=True)
         image = doc.add(
@@ -251,6 +255,8 @@ def _emit(doc: Document, node: _Node, parent_id: str, page: int, tolerance, font
                 page=page,
                 native_ref={**common["native_ref"], "alt_text": True},
             )
+        if picture is not None:
+            images.emit(doc, image, reader.read(picture.blob, picture.content_type))
 
 
 def _emit_table(doc: Document, node: _Node, common: dict) -> None:

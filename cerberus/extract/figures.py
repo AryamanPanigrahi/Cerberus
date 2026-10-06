@@ -100,28 +100,34 @@ def _is_edge(ink: np.ndarray, x: int, top: int, bottom: int) -> bool:
     return bool(strip.any(axis=1).mean() >= 0.9)
 
 
-def prepare(figure: Image.Image) -> tuple[Image.Image, int, int, int]:
+def prepare(
+    figure: Image.Image, border: int = 6, scale: int | None = None
+) -> tuple[Image.Image, int, int, int]:
     """Make a cut-out figure as readable as possible for OCR.
 
     Returns the prepared image and how to map its pixels back: the enlargement
     factor and the (x, y) offset of the crop inside the original cut-out.
 
-    - Crop to the content, dropping the frame and its white padding.
-    - Enlarge with a smooth (Lanczos) filter. Small figures are enlarged more,
-      because their print is smaller. Enlarging adds no information, but OCR
-      engines are tuned for letters a few dozen pixels tall.
+    - Crop to the content, dropping the frame (border pixels wide) and its white
+      padding. A stand-alone picture has no frame: pass border=0.
+    - Enlarge by `scale` with a smooth (Lanczos) filter. Enlarging adds no
+      information, but OCR engines are tuned for letters a few dozen pixels
+      tall and do worse on text that is much smaller or much larger. With no
+      scale given, guess from the width: narrow pictures get enlarged more.
     - Wherever the surroundings are dark (a terminal, a sidebar), invert, so
       text is dark on light everywhere. OCR reads light-on-dark poorly.
     """
-    border = 6
-    ink = np.asarray(figure)[border:-border, border:-border] < _INK
+    pixels = np.asarray(figure)
+    ink = pixels[border : pixels.shape[0] - border, border : pixels.shape[1] - border] < _INK
     rows, columns = np.flatnonzero(ink.any(axis=1)), np.flatnonzero(ink.any(axis=0))
     if len(rows) == 0:
         return figure, 1, 0, 0
     left, top = int(columns[0]) + border, int(rows[0]) + border
     content = figure.crop((left, top, int(columns[-1]) + border + 1, int(rows[-1]) + border + 1))
 
-    scale = min(_MAX_SCALE, max(2, math.ceil(_TARGET_WIDTH / content.width)))
+    if scale is None:
+        scale = math.ceil(_TARGET_WIDTH / content.width - 0.5)
+    scale = min(_MAX_SCALE, max(1, scale))
     image = content.resize((content.width * scale, content.height * scale), Image.LANCZOS)
 
     coarse = image.resize((max(1, image.width // 16), max(1, image.height // 16)), Image.BOX)

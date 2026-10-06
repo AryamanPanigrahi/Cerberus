@@ -205,7 +205,7 @@ cerberus/
 - [ ] Figure OCR quality: Tesseract cannot read 3 of the 13 sample figures (two UI/terminal screenshots and a chart) and reads the rest with noise. Decided: mask every figure whole for now. Later, evaluate a neural OCR engine (PaddleOCR or docTR) for figures only, to improve the audit report and image-only recall.
 - [x] PDF tables: pixel evidence added. A dark header band plus ruled lines marks out the table and its rows; single-row strips are merged and bridged columns split. On the sample, 59 of 67 detected tables have a clean header row.
 - [ ] PDF tables, remaining: tables continuing across a page break (no header band on the second page), two adjacent prose columns merged, cell text on coloured badges not read by OCR.
-- [ ] OCR for image regions in PPTX/DOCX, including EMF conversion.
+- [x] OCR for pictures in PPTX, DOCX and typed PDF pages (`images.py`): read once per distinct picture, EMF/WMF/SVG converted through LibreOffice, enlargement chosen from measured text height, lines emitted as image content. Unopenable or low-confidence pictures are quarantined. Extraction now covers every channel in all three formats.
 - [ ] Structure-retention metric.
 - [ ] Rule detectors with validators, then GLiNER/NER, dictionary sweep, merge, allowlist.
 - [ ] Tokenizer, redaction for text and each original format, including metadata rewrite.

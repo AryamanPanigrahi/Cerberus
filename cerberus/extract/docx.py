@@ -24,6 +24,7 @@ from pathlib import Path
 import docx
 from docx.oxml import parse_xml
 
+from . import images
 from .ir import BlockType, Container, Document, doc_id_from_bytes
 
 _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -61,8 +62,9 @@ def extract_docx(path: str | Path) -> Document:
     src = docx.Document(str(path))
     styles = _style_table(src.styles.element)
 
+    reader = images.Reader()  # one per document, so a repeated picture is read once
     _emit_properties(doc, src)
-    _Walker(doc, src.part, src.element.body, styles).walk(src.element.body)
+    _Walker(doc, src.part, src.element.body, styles, reader).walk(src.element.body)
 
     related = sorted(src.part.rels.values(), key=lambda rel: rel.target_ref)
     for rel in related:
@@ -71,7 +73,7 @@ def extract_docx(path: str | Path) -> Document:
             continue
         part = rel.target_part
         type_ = BlockType.HEADER if kind == "header" else BlockType.FOOTER
-        _emit_container(doc, type_, part, part.element, part.element, styles, {})
+        _emit_container(doc, type_, part, part.element, part.element, styles, reader, {})
 
     for rel in related:
         kind = rel.reltype.rsplit("/", 1)[-1]
@@ -85,7 +87,9 @@ def extract_docx(path: str | Path) -> Document:
             if note.get(_w("type")) in _NOT_A_NOTE:
                 continue
             ref = {"kind": kind, "id": note.get(_w("id"))}
-            _emit_container(doc, BlockType.NOTES, part, root, note, styles, ref, note.get(_AUTHOR))
+            _emit_container(
+                doc, BlockType.NOTES, part, root, note, styles, reader, ref, note.get(_AUTHOR)
+            )
 
     errors = doc.validate()
     if errors:
@@ -119,7 +123,7 @@ def _emit_properties(doc: Document, src) -> None:
                 doc.add(BlockType.METADATA, leaf.text.strip(), native_ref={key: _local(leaf)})
 
 
-def _emit_container(doc, type_, part, root, element, styles, ref, author=None) -> None:
+def _emit_container(doc, type_, part, root, element, styles, reader, ref, author=None) -> None:
     """A header, footer or note: one parent block, dropped again if it holds nothing."""
     container = doc.add(type_, native_ref={"part": str(part.partname), **ref})
     before = len(doc.blocks)
@@ -130,7 +134,7 @@ def _emit_container(doc, type_, part, root, element, styles, ref, author=None) -
             parent_id=container.block_id,
             native_ref={**container.native_ref, "comment_author": True},
         )
-    _Walker(doc, part, root, styles).walk(element, container.block_id)
+    _Walker(doc, part, root, styles, reader).walk(element, container.block_id)
     if len(doc.blocks) == before:
         doc.blocks.pop()
 
@@ -138,8 +142,9 @@ def _emit_container(doc, type_, part, root, element, styles, ref, author=None) -
 class _Walker:
     """Walks the block-level content of one part (body, a header, a note...)."""
 
-    def __init__(self, doc: Document, part, root, styles: dict):
+    def __init__(self, doc: Document, part, root, styles: dict, reader: images.Reader):
         self.doc = doc
+        self.reader = reader
         self.part = part
         self.name = str(part.partname)
         self.styles = styles
@@ -336,6 +341,7 @@ class _Walker:
         for rid, alt in extras["images"]:
             image_ref = {**ref, "rid": rid}
             rel = self.part.rels.get(rid)
+            target = None
             if rel is None or rel.is_external:  # linked, not embedded: no bytes to OCR
                 image_ref["linked"] = True
             else:
@@ -360,6 +366,9 @@ class _Walker:
                     section_path=self._section(),
                     native_ref={**ref, "alt_text": True},
                 )
+            if target is not None:
+                reading = self.reader.read(target.blob, target.content_type)
+                images.emit(self.doc, image, reading)
         for box in extras["boxes"]:
             self.walk(box, owner, BlockType.TEXT_BOX)
         for url in dict.fromkeys(extras["links"]):

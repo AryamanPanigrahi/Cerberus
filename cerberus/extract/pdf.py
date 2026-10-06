@@ -28,14 +28,14 @@ import numpy as np
 import pymupdf
 from PIL import Image
 
-from . import figures, layout, ocr
+from . import figures, images, layout, ocr
 from .ir import BBox, Block, BlockType, Container, Document, Page, Source, Unit, Word, doc_id_from_bytes
 
 # Starting values, to be calibrated against labelled pages.
 OCR_DPI = 300  # render resolution; small print needs about this much to be legible
 MIN_NATIVE_CHARS = 50  # fewer characters than this in the text layer: treat as scanned
 MIN_PAGE_CONFIDENCE = 0.70  # mean OCR confidence below this quarantines the page
-MIN_FIGURE_CONFIDENCE = 0.60  # ...and below this, a figure
+MIN_FIGURE_CONFIDENCE = images.MIN_IMAGE_CONFIDENCE  # ...and below this, a figure
 _MARGIN = 0.06  # running headers and footers live in the top and bottom 6% of the page
 _INFO_KEYS = ("title", "author", "subject", "keywords", "creator", "producer")
 
@@ -147,35 +147,17 @@ def _read_figure(page, frame, dpi: int) -> _Figure:
     clip = pymupdf.Rect(*frame) * (72 / dpi)
     pixmap = page.get_pixmap(dpi=native, colorspace=pymupdf.csGRAY, clip=clip)
     cutout = Image.frombytes("L", (pixmap.width, pixmap.height), pixmap.samples)
-    image, scale, left, top = figures.prepare(cutout)
-
     k = dpi / native  # cut-out pixels -> page pixels
     words = [
         ocr.OcrWord(
             w.text,
-            frame[0] + (left + w.x0 / scale) * k,
-            frame[1] + (top + w.y0 / scale) * k,
-            frame[0] + (left + w.x1 / scale) * k,
-            frame[1] + (top + w.y1 / scale) * k,
-            w.conf,
-            w.line,
+            frame[0] + w.x0 * k, frame[1] + w.y0 * k,
+            frame[0] + w.x1 * k, frame[1] + w.y1 * k,
+            w.conf, w.line,
         )
-        for w in _best_reading(image)
+        for w in images.read_pixels(cutout, border=6)  # 6: skip the frame itself
     ]
     return _Figure(frame, layout.build_lines(words))
-
-
-def _best_reading(image: Image.Image) -> list[ocr.OcrWord]:
-    """OCR a figure under several segmentation modes and keep the best reading.
-
-    No single mode suits every figure: a form reads best as one block (6), a
-    badge or card as a column (4), a diagram as scattered text (11). The best
-    reading is the one with the most confidently read characters.
-    """
-    def score(words):
-        return sum(w.conf * len(w.text) for w in words if w.conf >= 0.6)
-
-    return max((ocr.ocr_image(image, psm=mode) for mode in (6, 4, 11)), key=score)
 
 
 def _furniture(scanned: dict[int, list[layout.Line]], heights: dict[int, float]) -> dict:
@@ -207,6 +189,7 @@ class _Emitter:
         self.doc = doc
         self.k = to_points  # OCR pixels -> PDF points
         self.headings: list[tuple[int, Block]] = []  # open headings as (level, block)
+        self.reader = images.Reader()
 
     def _context(self) -> dict:
         return dict(
@@ -292,17 +275,12 @@ class _Emitter:
 
     def _ocr_fields(self, words: list[ocr.OcrWord]) -> dict:
         """Block text for a run of OCR words, with each word's character span and box."""
-        k, text, spans = self.k, "", []
-        for previous, word in zip([None, *words], words):
-            if previous is not None:
-                # A word broken by a hyphen at a line end is rejoined; the wrap
-                # shows as the next word starting further left.
-                wrapped = word.x0 < previous.x0
-                if not (wrapped and previous.text.endswith("-") and len(previous.text) > 1):
-                    text += " "
-            box = BBox(word.x0 * k, word.y0 * k, word.x1 * k, word.y1 * k, Unit.PT)
-            spans.append(Word(len(text), len(text) + len(word.text), box, word.conf))
-            text += word.text
+        k = self.k
+        text, placed = layout.compose(words)
+        spans = [
+            Word(a, b, BBox(w.x0 * k, w.y0 * k, w.x1 * k, w.y1 * k, Unit.PT), w.conf)
+            for a, b, w in placed
+        ]
         fields = dict(text=text, words=spans, source=Source.OCR)
         if words:
             fields["ocr_conf"] = sum(w.conf for w in words) / len(words)
@@ -320,11 +298,25 @@ class _Emitter:
         body_size = median(sizes) if sizes else 0
         for b in blocks:
             box = BBox(*b["bbox"], Unit.PT)
-            if b["type"] != 0:  # an embedded picture; its text is added by the OCR stage
-                self.doc.add(
+            if b["type"] != 0:  # an embedded picture: read the text inside it
+                region = self.doc.add(
                     BlockType.IMAGE_REGION, page=number, bbox=box,
                     container=Container.IMAGE, **self._context(),
                 )
+                reading = self.reader.read(b["image"])
+                if reading.size:
+                    # Picture pixels -> page points, through the picture's box on the page.
+                    kx = (box.x1 - box.x0) / reading.size[0]
+                    ky = (box.y1 - box.y0) / reading.size[1]
+
+                    def place(x0, y0, x1, y1, box=box, kx=kx, ky=ky):
+                        return BBox(
+                            box.x0 + x0 * kx, box.y0 + y0 * ky,
+                            box.x0 + x1 * kx, box.y0 + y1 * ky, Unit.PT,
+                        )
+                else:
+                    place = None
+                images.emit(self.doc, region, reading, place)
                 continue
             lines = ["".join(s["text"] for s in ln["spans"]).strip() for ln in b["lines"]]
             text = " ".join(line for line in lines if line)

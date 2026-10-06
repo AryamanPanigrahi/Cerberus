@@ -52,7 +52,7 @@ def test_prepare_crops_enlarges_and_makes_dark_panels_light():
     figure = Image.new("L", (400, 200), 255)
     figure.paste(20, (100, 50, 300, 150))  # a dark panel, like a terminal window
     figure.paste(230, (150, 99, 250, 101))  # a thin light stroke on it, like a letter
-    image, scale, left, top = figures.prepare(figure)
+    image, scale, left, top = figures.prepare(figure)  # no scale given: guessed from width
     assert (left, top) == (100, 50)
     assert image.size == (200 * scale, 100 * scale) and scale == figures._MAX_SCALE
     pixels = np.asarray(image)
