@@ -9,7 +9,10 @@ found by looking for lines. Instead:
 - a line is "tabular" if it has a gap much wider than a normal word space;
 - consecutive tabular lines, plus the wrapped lines between them, form a table;
 - columns are the vertical strips of white space that no line of the table crosses;
-- rows are split where the line spacing jumps (a new row has padding above it).
+- rows are the bands between ruled lines if the table has them, otherwise they
+  are split where the line spacing jumps (a new row has padding above it);
+- a strip only one row uses is merged away, and a strip hiding two columns is
+  split where most rows start a word at the same x.
 """
 
 from __future__ import annotations
@@ -124,8 +127,14 @@ def build_lines(words: list[OcrWord]) -> list[Line]:
     return sorted(merged, key=lambda ln: (ln.y0, ln.x0))
 
 
-def analyse(lines: list[Line]) -> list[TextRegion | TableRegion]:
-    """Lines (top to bottom) -> regions in reading order. Assumes one text column."""
+def analyse(lines: list[Line], rules=()) -> list[TextRegion | TableRegion]:
+    """Lines (top to bottom) -> regions in reading order. Assumes one text column.
+
+    rules: horizontal lines drawn on the page, as (y, x0, x1, band_top), if the
+    caller has the page image (see figures.horizontal_rules). They are optional
+    evidence: a dark header band followed by ruled lines marks out a table
+    exactly, which is more reliable than judging by the gaps between words.
+    """
     if not lines:
         return []
     scale = _measure(lines)
@@ -136,9 +145,16 @@ def analyse(lines: list[Line]) -> list[TextRegion | TableRegion]:
         regions.extend(_paragraphs(pending, scale))
         pending.clear()
 
+    ruled = dict(_ruled_spans(lines, rules, scale))
     i = 0
     while i < len(lines):
-        end = _table_end(lines, i, scale)
+        if i in ruled:
+            flush()
+            regions.append(_table(lines[i : ruled[i]], scale, rules))
+            i = ruled[i]
+            continue
+        stop = min((start for start in ruled if start > i), default=len(lines))
+        end = _table_end(lines, i, scale, stop)
         if end is None:
             pending.append(lines[i])
             i += 1
@@ -149,7 +165,7 @@ def analyse(lines: list[Line]) -> list[TextRegion | TableRegion]:
             start -= 1
             pending.pop()
         flush()
-        regions.append(_table(lines[start:end], scale))
+        regions.append(_table(lines[start:end], scale, rules))
         i = end
     flush()
     return regions
@@ -218,12 +234,51 @@ def _heading_level(line: Line, scale: _Scale) -> int | None:
 # --- tables ---------------------------------------------------------------
 
 
-def _table_end(lines: list[Line], start: int, scale: _Scale) -> int | None:
-    """If a table starts at lines[start], the index one past its last line."""
+def _ruled_spans(lines: list[Line], rules, scale: _Scale) -> list[tuple[int, int]]:
+    """Tables drawn with a dark header band and ruled lines, as line index ranges.
+
+    The table runs from the top of the band down through each following rule
+    of the same width, as long as there is text between one rule and the next.
+    It stops at the next band, at a heading, or at a long empty gap.
+    """
+    def centre(line):
+        return (line.y0 + line.y1) / 2
+
+    spans: list[tuple[int, int]] = []
+    ordered = sorted(rules)
+    slack = 2 * scale.height
+    for index, band in enumerate(ordered):
+        if band[3] is None:
+            continue
+        last, bottom = band[0], None
+        for rule in ordered[index + 1 :]:
+            if rule[3] is not None:  # the next table's header
+                break
+            if abs(rule[1] - band[1]) > slack or abs(rule[2] - band[2]) > slack:
+                continue
+            if rule[0] - last < 0.5 * scale.height:  # a doubled line
+                last = rule[0]
+                continue
+            between = [ln for ln in lines if last < centre(ln) < rule[0]]
+            if not between or rule[0] - last > 14 * scale.height:
+                break
+            if any(_heading_level(ln, scale) is not None for ln in between):
+                break
+            last = bottom = rule[0]
+        if bottom is None:
+            continue
+        inside = [k for k, ln in enumerate(lines) if band[3] <= centre(ln) <= bottom]
+        if inside and (not spans or inside[0] >= spans[-1][1]):
+            spans.append((inside[0], inside[-1] + 1))
+    return spans
+
+
+def _table_end(lines: list[Line], start: int, scale: _Scale, stop: int) -> int | None:
+    """If a table starts at lines[start], the index one past its last line (at most stop)."""
     if len(lines[start].segments(scale.cell_gap)) < 2:
         return None
     end, tabular = start + 1, 1
-    while end < len(lines):
+    while end < stop:
         line, previous = lines[end], lines[end - 1]
         # Sizes are taken from the table itself: its type is often smaller than the body's.
         height = median(w.height for ln in lines[start:end] for w in ln.words)
@@ -283,12 +338,51 @@ def _fits(line: Line, columns: list[tuple[float, float]], scale: _Scale) -> bool
     return True
 
 
-def _table(lines: list[Line], scale: _Scale) -> TableRegion:
+def _table(lines: list[Line], scale: _Scale, rules=()) -> TableRegion:
     columns = _columns(lines, scale)
-    table = TableRegion(columns)
+    groups = _rows_from_rules(lines, rules, scale) or _rows_from_spacing(lines, columns)
+    columns = _split_columns(_merge_columns(columns, groups), groups, scale)
 
-    # Wrapped lines of a cell sit closer together than rows do, because a new
-    # row has padding above it. Look for that step in the line spacings.
+    table = TableRegion(columns)
+    for group in groups:
+        cells: list[list[OcrWord]] = [[] for _ in columns]
+        for line in group:  # top to bottom, each already left to right
+            for word in line.words:
+                cells[_column_of(word, columns)].append(word)
+        table.rows.append((min(ln.y0 for ln in group), max(ln.y1 for ln in group)))
+        table.cells.append(cells)
+    return table
+
+
+def _rows_from_rules(lines: list[Line], rules, scale: _Scale) -> list[list[Line]] | None:
+    """Rows as the bands between horizontal lines drawn across the table.
+
+    This is the reliable signal when it exists: a cell that wraps onto three
+    lines is still one band. It is used only if the lines cut the table into at
+    least three bands; a single rule under the header says nothing about the
+    rows below it.
+    """
+    left, right = min(ln.x0 for ln in lines), max(ln.x1 for ln in lines)
+    top, bottom = lines[0].y0, lines[-1].y1
+    slack = 2 * scale.height
+    cuts: list[float] = []
+    for y, x0, x1, _ in sorted(rules):
+        spans = x0 <= left + slack and x1 >= right - slack
+        if spans and top < y < bottom and (not cuts or y - cuts[-1] > 0.5 * scale.height):
+            cuts.append(y)
+    bands: dict[int, list[Line]] = {}
+    for line in lines:
+        centre = (line.y0 + line.y1) / 2
+        bands.setdefault(sum(cut < centre for cut in cuts), []).append(line)
+    return [bands[key] for key in sorted(bands)] if len(bands) >= 3 else None
+
+
+def _rows_from_spacing(lines: list[Line], columns) -> list[list[Line]]:
+    """Rows from line spacing, for tables with no ruled lines between rows.
+
+    Wrapped lines of a cell sit closer together than rows do, because a new
+    row has padding above it. Look for that step in the line spacings.
+    """
     pitches = [b.top - a.top for a, b in zip(lines, lines[1:])]
     filled = [len({_column_of(w, columns) for w in line.words}) for line in lines]
     ordered = sorted(pitches)
@@ -311,15 +405,73 @@ def _table(lines: list[Line], scale: _Scale) -> TableRegion:
         if pitch > threshold:
             groups.append([])
         groups[-1].append(line)
+    return groups
 
+
+def _merge_columns(columns, groups: list[list[Line]]) -> list[tuple[float, float]]:
+    """Drop columns that only one row uses.
+
+    White-space strips over-split when a header's words are spread out, or a
+    wrapped word lands on its own: the stray strip has text in a single row. A
+    real column has text in at least two rows.
+    """
+    if len(groups) < 3:
+        return columns
+    support = [0] * len(columns)
     for group in groups:
-        cells: list[list[OcrWord]] = [[] for _ in columns]
-        for line in group:  # top to bottom, each already left to right
-            for word in line.words:
-                cells[_column_of(word, columns)].append(word)
-        table.rows.append((min(ln.y0 for ln in group), max(ln.y1 for ln in group)))
-        table.cells.append(cells)
-    return table
+        for index in {_column_of(w, columns) for line in group for w in line.words}:
+            support[index] += 1
+    merged: list[list[float]] = []
+    for (x0, x1), rows in zip(columns, support):
+        if merged and rows < 2:
+            merged[-1][1] = x1
+        else:
+            merged.append([x0, x1])
+    if len(merged) > 1 and support[0] < 2:  # a stray first strip joins its right neighbour
+        merged[1][0] = merged[0][0]
+        merged.pop(0)
+    return [(a, b) for a, b in merged]
+
+
+def _split_columns(columns, groups: list[list[Line]], scale: _Scale) -> list[tuple[float, float]]:
+    """Split a strip that is really two columns whose text nearly touches in some row.
+
+    One long value closing the gap in a single row is enough to hide the white
+    space between two columns. The second column still shows: in most rows a
+    word starts at exactly the same x, after a gap wider than a word space.
+    Words inside a cell also line up sometimes ("Tier 1", "Tier 2"), but only a
+    single space apart, which is why the gap is checked.
+    """
+    tolerance = 0.4 * scale.height
+    result: list[tuple[float, float]] = []
+    for index, (x0, x1) in enumerate(columns):
+        starts: list[tuple[float, float, int]] = []  # (word x, gap before it, row)
+        used = set()
+        for row, group in enumerate(groups):
+            for line in group:
+                inside = [w for w in line.words if _column_of(w, columns) == index]
+                used.update([row] if inside else [])
+                starts += [(b.x0, b.x0 - a.x1, row) for a, b in zip(inside, inside[1:])]
+        cut = None
+        for x, _, _ in sorted(starts):
+            near = [s for s in starts if abs(s[0] - x) <= tolerance]
+            rows = {row for _, _, row in near}
+            wide = sorted(gap for _, gap, _ in near)[len(near) // 2] >= 2 * scale.space
+            crossing = sum(
+                1
+                for group in groups
+                for line in group
+                for w in line.words
+                if _column_of(w, columns) == index and w.x0 < x - tolerance < w.x1
+            )
+            if len(rows) >= max(3, 0.6 * len(used)) and wide and crossing == 0:
+                cut = min(s[0] for s in near)
+                break
+        if cut is None:
+            result.append((x0, x1))
+        else:
+            result += [(x0, cut - tolerance), (cut - tolerance / 2, x1)]
+    return result
 
 
 # --- running text -----------------------------------------------------------

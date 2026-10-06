@@ -56,6 +56,7 @@ def extract_pdf(path: str | Path, dpi: int = OCR_DPI) -> Document:
         # Pass 1: read every page, so repeated headers and footers can be recognised.
         scanned: dict[int, list[layout.Line]] = {}
         framed: dict[int, list[_Figure]] = {}
+        ruled: dict[int, list] = {}
         for page in pdf:
             number = page.number + 1
             info = Page(number, page.rect.width, page.rect.height, Unit.PT)
@@ -70,6 +71,7 @@ def extract_pdf(path: str | Path, dpi: int = OCR_DPI) -> Document:
             words = ocr.ocr_image(image)
             gray = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width)
             frames = figures.find_frames(gray)
+            ruled[number] = figures.horizontal_rules(gray)
             framed[number] = [_read_figure(page, frame, dpi) for frame in frames]
             # What the page pass read inside a figure is replaced by the enlarged pass.
             words = [w for w in words if not any(_inside(w, frame) for frame in frames)]
@@ -92,7 +94,9 @@ def extract_pdf(path: str | Path, dpi: int = OCR_DPI) -> Document:
                 if info.ocr_conf < MIN_PAGE_CONFIDENCE:
                     info.quarantined = True
                     info.reason = f"OCR confidence {info.ocr_conf:.2f} below {MIN_PAGE_CONFIDENCE}"
-            emitter.scanned_page(lines, furniture.get(number, {}), framed[number], number)
+            emitter.scanned_page(
+                lines, furniture.get(number, {}), framed[number], ruled[number], number
+            )
 
     errors = doc.validate()
     if errors:
@@ -218,13 +222,13 @@ class _Emitter:
 
     # --- scanned pages ----------------------------------------------------
 
-    def scanned_page(self, lines, furniture: dict, framed: list, page: int) -> None:
+    def scanned_page(self, lines, furniture: dict, framed: list, rules: list, page: int) -> None:
         body = [line for line in lines if id(line) not in furniture]
         marginal = [line for line in lines if id(line) in furniture]
         for line in marginal:
             if furniture[id(line)] is BlockType.HEADER:
                 self.doc.add(BlockType.HEADER, page=page, **self._ocr_fields(line.words))
-        regions = [*layout.analyse(body), *framed]
+        regions = [*layout.analyse(body, rules), *framed]
         for region in sorted(regions, key=lambda r: r.y0):
             if isinstance(region, _Figure):
                 self._figure(region, page)

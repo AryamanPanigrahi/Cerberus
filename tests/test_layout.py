@@ -92,3 +92,69 @@ def test_small_print_does_not_turn_body_text_into_headings():
         words += line({100: "Tiny Figure Caption"}, 400 + 12 * i, 10 + i, height=8)
     kinds = {r.kind for r in layout.analyse(layout.build_lines(words))}
     assert "heading" not in kinds
+
+
+def table_of(words, rules=()):
+    (table,) = [r for r in layout.analyse(layout.build_lines(words), rules) if isinstance(r, layout.TableRegion)]
+    return [[" ".join(w.text for w in cell) for cell in row] for row in table.cells]
+
+
+def test_ruled_lines_decide_rows_when_every_column_wraps():
+    rows = [
+        ({110: "RATING", 400: "MEANING"}, 460),
+        ({110: "Severe and", 400: "Sustained outage of an"}, 512),
+        ({110: "widespread", 400: "important service"}, 548),
+        ({110: "Minor and", 400: "Localised disruption"}, 600),
+        ({110: "contained", 400: "absorbed in a day"}, 636),
+    ]
+    words = [w for key, (text_by_x, y) in enumerate(rows) for w in line(text_by_x, y, key)]
+    # Spacing alone cannot tell a wrapped line from a new row here...
+    assert len(table_of(words)) == 5
+    # ...but the lines drawn between the rows can.
+    rules = [(495, 100, 700, None), (585, 100, 700, None)]
+    assert table_of(words, rules) == [
+        ["RATING", "MEANING"],
+        ["Severe and widespread", "Sustained outage of an important service"],
+        ["Minor and contained", "Localised disruption absorbed in a day"],
+    ]
+
+
+def test_a_strip_used_by_one_row_is_not_a_column():
+    rows = [
+        ({110: "CASE", 400: "DATE", 700: "RAISED"}, 460),  # a header with its words spread out
+        ({110: "CASE-0001", 400: "2026-01-01"}, 512),
+        ({110: "CASE-0002", 400: "2026-01-02"}, 564),
+        ({110: "CASE-0003", 400: "2026-01-03"}, 616),
+    ]
+    words = [w for key, (text_by_x, y) in enumerate(rows) for w in line(text_by_x, y, key)]
+    assert table_of(words)[0] == ["CASE", "DATE RAISED"]
+    assert table_of(words)[3] == ["CASE-0003", "2026-01-03"]
+
+
+def test_two_columns_bridged_by_one_long_value_are_split():
+    rows = [
+        ({110: "NAME", 400: "ID", 560: "TEAM"}, 460),
+        ({110: "Jane Sample", 400: "VND-00000", 560: "Sales"}, 512),
+        ({110: "Omar Placeholder", 400: "VND-00001", 560: "Finance"}, 564),
+        ({110: "Ana Example", 400: "VND-00002-LONGE", 560: "Legal"}, 616),  # ends where TEAM starts
+        ({110: "Lee Specimen", 400: "VND-00003", 560: "Audit"}, 668),
+    ]
+    words = [w for key, (text_by_x, y) in enumerate(rows) for w in line(text_by_x, y, key)]
+    assert table_of(words) == [
+        ["NAME", "ID", "TEAM"],
+        ["Jane Sample", "VND-00000", "Sales"],
+        ["Omar Placeholder", "VND-00001", "Finance"],
+        ["Ana Example", "VND-00002-LONGE", "Legal"],
+        ["Lee Specimen", "VND-00003", "Audit"],
+    ]
+
+
+def test_words_that_line_up_inside_a_cell_do_not_split_it():
+    rows = [
+        ({110: "TIER", 400: "REVIEW"}, 460),
+        ({110: "Tier 1 Critical", 400: "Quarterly"}, 512),
+        ({110: "Tier 2 Material", 400: "Annual"}, 564),
+        ({110: "Tier 3 Standard", 400: "Biennial"}, 616),
+    ]
+    words = [w for key, (text_by_x, y) in enumerate(rows) for w in line(text_by_x, y, key)]
+    assert table_of(words)[1] == ["Tier 1 Critical", "Quarterly"]

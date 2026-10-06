@@ -102,3 +102,16 @@ def test_figure_text_is_read_enlarged_and_marked_as_image_content(scanned_with_f
     box = line.span_boxes(line.text.index("VND"), len(line.text))[0]
     assert 195 < box.x0 < 210 and 228 < box.y0 < 242
     assert 68 < region.bbox.x0 < 76 and 146 < region.bbox.y0 < 154
+
+
+def test_a_header_band_counts_as_one_rule_below_its_text():
+    page = blank_page()
+    page[200:241, 100:700] = 40  # dark header band
+    page[212:224, 150:300] = 255  # white header text breaks the band's rows
+    page[300, 100:700] = 200  # faint row rules
+    page[360, 100:700] = 200
+    assert figures.horizontal_rules(page) == [
+        (224, 100, 699, 200),  # the band: one rule under its text, remembering its top
+        (300, 100, 699, None),
+        (360, 100, 699, None),
+    ]

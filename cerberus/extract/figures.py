@@ -49,6 +49,32 @@ def find_frames(gray: np.ndarray) -> list[tuple[int, int, int, int]]:
     return sorted(set(outer), key=lambda f: f[1])
 
 
+def horizontal_rules(gray: np.ndarray) -> list[tuple[int, int, int, int | None]]:
+    """Long horizontal lines that separate things: table rules among them.
+
+    Each is (y, x0, x1, band_top). A thin line has band_top None.
+
+    A filled dark band (a table header) is not one line but many: its top
+    edge, and every row of pixels between and below its lines of text. Those
+    are folded into one rule at the last of them, just under the header text,
+    with band_top recording where the band began. So a band acts as a single
+    separator however many lines of text the header has, and marks where a
+    table starts.
+    """
+    lines = _horizontal_lines(gray < _INK, int(_MIN_WIDTH * gray.shape[1]))
+    reach = 0.015 * gray.shape[0]  # dark lines closer than this belong to one band
+    rules: list[tuple[int, int, int, int | None]] = []
+    for y, x0, x1 in lines:
+        # Judge darkness a few rows in: the first row of a band is its blurred edge.
+        inner = min(y + 3, gray.shape[0] - 1)
+        dark = float(gray[inner, x0 : x1 + 1].mean()) < 128
+        if dark and rules and rules[-1][3] is not None and y - rules[-1][0] <= reach:
+            rules[-1] = (y, x0, x1, rules[-1][3])
+        else:
+            rules.append((y, x0, x1, y if dark else None))
+    return rules
+
+
 def _horizontal_lines(ink: np.ndarray, min_length: int) -> list[tuple[int, int, int]]:
     """Long unbroken horizontal runs of ink, as (y, x0, x1), one per run of adjacent rows."""
     found: list[tuple[int, int, int]] = []
