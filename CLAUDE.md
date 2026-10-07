@@ -214,9 +214,11 @@ cerberus/
 - [x] False-positive gates: a name seeds the sweep only with independent evidence (an e-mail carrying its surname, a staff ID in the same block or row, a person-type column header, an author file property, or two sightings); names on low-confidence OCR words cannot seed. Addresses must contain a street line or a postcode. Optional review file (`detect(..., review=path)`): written on first run with the pipeline's keep/drop decision and evidence per name; a person's edits are applied on the next run. On the sample: 104 names kept, 11 held back (all real, single mentions), at a cost of 3 missed mentions in the DOCX.
 - [ ] Detection, remaining: allowlist for organisation contact details (a switchboard number, a letterhead address), single-name mentions (a first name alone), names in all capitals with a middle initial, and calibration of thresholds once labels exist.
 - [ ] Set-up note for a new machine: install CPU torch, `pip install -r requirements.txt`, then download the model once into `models/gliner-pii-small-v1.0` (about 320 MB). Nothing is fetched at run time.
-- [ ] Tokenizer, redaction for text and each original format, including metadata rewrite.
+- [x] Entity resolution and stable tokens (`cerberus/redact/tokens.py`): values are compared after normalising how they are written; people by full name, with written forms resolving to one person, a surname alone never linking, and an abbreviation linked only if exactly one person fits. A saved vault (`outputs/vault.json`, holds original values) keeps numbering stable across runs. `image_only()` lists identities seen only inside pictures (E.6 #3). On the sample: 1,104 findings resolve to 300 identities, 100 of them people; 2 people appear in more than one file; 41 identities appear only in pictures.
+- [ ] Redaction for text and each original format, including metadata rewrite.
 - [ ] Verification pass: re-scan every output including metadata, plus raw-content search for token-map values; fail closed on any residual PII.
 - [ ] Audit log and per-file summary.
-- [ ] Ground-truth labels and evaluation (teammates may do the labelling).
+- [x] PII evaluation tool (`cerberus/eval/pii.py`): writes one CSV per document to `labels/pii/` with a row per finding; a person marks each `ok` or `wrong` and adds `missed` rows; `score` reports precision, recall and F1 overall, by entity and by location. Re-exporting keeps verdicts already given.
+- [ ] PII labelling by the team: mark the three sheets in `labels/pii/` (927, 124 and 53 rows) and add the misses by reading each document. Nothing is marked yet, so there is no precision or recall figure.
 - [ ] Demo notebook / UI.
 - [ ] Deck (built separately, not in this repo).
