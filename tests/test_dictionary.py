@@ -107,9 +107,13 @@ def test_a_name_seen_once_with_nothing_to_back_it_is_not_swept():
     doc = Document("d0c", "sample.docx", "docx")
     first = doc.add(BlockType.PARAGRAPH, "Zorp Blenk was selected.")
     doc.add(BlockType.PARAGRAPH, "Zorp Blenk appears again here.")
+    doc.add(BlockType.PARAGRAPH, "Z. Blenk and Zorp Blemk are near it.", source=Source.OCR)
     lone = person(doc, first, 0, 10)
     assert dictionary.candidates([doc], [lone]) == {"Zorp Blenk": ()}
-    assert dictionary.detect([doc], [lone]) == []  # the one finding stays; nothing is added
+    # Exact repeats are still caught; its abbreviated and approximate forms are not searched for.
+    assert [(f.text, f.rule) for f in dictionary.detect([doc], [lone])] == [
+        ("Zorp Blenk", "name_exact"), ("Zorp Blenk", "name_exact"),
+    ]
 
 
 def test_each_kind_of_evidence_lets_a_name_be_swept():
@@ -159,13 +163,22 @@ def test_review_file_round_trip_and_overrides(tmp_path):
     path = tmp_path / "review" / "names.txt"
     dictionary.write_review(path, dictionary.candidates([doc], known))
     lines = [ln.split("\t") for ln in path.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")]
-    assert lines == [["drop", "Zorp Blenk", "no supporting evidence"], ["keep", "Jane Sample", "repeated"]]
+    assert lines == [["exact", "Zorp Blenk", "no supporting evidence"], ["keep", "Jane Sample", "repeated"]]
 
     # Unedited, the file changes nothing.
     keep, drop = dictionary.read_review(path)
-    assert [f.text for f in dictionary.detect([doc], known, keep, drop)] == ["Jane Sample", "Jane Sample"]
+    unedited = [f.text for f in dictionary.detect([doc], known, keep, drop)]
+    assert unedited == [f.text for f in dictionary.detect([doc], known)]
 
     # A person can overrule the pipeline in either direction.
     path.write_text("keep\tZorp Blenk\ndrop\tJane Sample\n", encoding="utf-8")
     keep, drop = dictionary.read_review(path)
     assert [f.text for f in dictionary.detect([doc], known, keep, drop)] == ["Zorp Blenk", "Zorp Blenk"]
+    assert (keep, drop) == (frozenset({"zorp blenk"}), frozenset({"jane sample"}))
+
+
+def test_a_misread_first_letter_does_not_hide_the_name():
+    # OCR read the capital "I" of "Iris" as a small "l"; a shorter piece of the name was also matched.
+    text = "Reviewed by lris Q. Sample on Monday."
+    found = sweep(text, "Iris Q. Sample", "Q. Sample", source=Source.OCR)
+    assert found == [("lris Q. Sample", "name_approximate")]

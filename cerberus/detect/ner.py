@@ -101,6 +101,8 @@ def detect(
                     continue
                 block, start, end = located
                 start, end = _trim(block.text, start, end)
+                if span["label"] == "person":
+                    start = _complete_left(block.text, start, end)
                 entity, value = LABELS[span["label"]], block.text[start:end]
                 plausible = allowlist.plausible_person if entity == "PERSON" else allowlist.plausible_address
                 if not plausible(value):
@@ -178,6 +180,29 @@ def _locate(piece: _Piece, start: int, end: int) -> tuple[Block, int, int] | Non
         if a <= start and end <= b:
             return block, offset + start - a, offset + end - a
     return None
+
+
+_STARTS_WITH_INITIAL = re.compile(r"[A-Z]\.?\s")
+_WORD_BEFORE = re.compile(r"([^\W\d_]+(?:[-'’][^\W\d_]+)*)\s$")
+
+
+def _complete_left(text: str, start: int, end: int) -> int:
+    """Take in a first name the model left outside the span.
+
+    The model sometimes returns "Q. Sample" from "Jane Q. Sample". A span that
+    begins with an initial, straight after a capitalised word that is not a
+    title or label, is a name missing its first word. Leaving that word
+    unmasked would show half the name.
+    """
+    if not _STARTS_WITH_INITIAL.match(text[start:end]):
+        return start
+    before = _WORD_BEFORE.search(text[:start])
+    if before is None:
+        return start
+    word = before.group(1)
+    if len(word) > 2 and allowlist._is_name_word(word) and word.lower() not in allowlist.NOT_NAME_WORDS:
+        return before.start(1)
+    return start
 
 
 def _trim(text: str, start: int, end: int) -> tuple[int, int]:

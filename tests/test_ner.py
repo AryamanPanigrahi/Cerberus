@@ -133,3 +133,14 @@ def test_the_real_model_finds_names_and_not_titles():
     doc.add(BlockType.PARAGRAPH, "Primary supplier contact and Email ID of supplier lead are mandatory attributes.")
     people = [f.text for f in ner.detect([doc]) if f.entity == "PERSON"]
     assert people == ["Jane Sample", "Omar Placeholder"]
+
+
+def test_a_name_the_model_cut_short_is_completed():
+    def cut_short(texts, labels, threshold):
+        return [[dict(start=t.index("Q. Sample"), end=t.index("Q. Sample") + 9, label="person", score=0.4)]
+                if "Q. Sample" in t else [] for t in texts]
+
+    doc = Document("d0c", "sample.docx", "docx")
+    doc.add(BlockType.PARAGRAPH, "It was signed by Jane Q. Sample yesterday.")
+    doc.add(BlockType.PARAGRAPH, "The Manager Q. Sample signed it.")  # a title is not a first name
+    assert [f.text for f in ner.detect([doc], cut_short, "fake")] == ["Jane Q. Sample", "Q. Sample"]

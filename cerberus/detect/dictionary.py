@@ -85,8 +85,10 @@ def candidates(docs: list[Document], findings: list[Finding]) -> dict[str, tuple
     - repeated:      the model found it in at least two places (a sighting in a
                      picture counts here, once there is a clean one elsewhere)
 
-    A name with no evidence stays as a single finding where the model saw it.
-    It is still masked there; it is just not multiplied.
+    A name with no evidence is searched for only exactly as it was written. Its
+    abbreviated and approximate forms are not, because those are the forms that
+    turn one mistake into many. Exact repeats must be caught regardless: text
+    the pipeline already believes is a name cannot be left in the output.
 
     Never eligible, whatever the evidence: names read out of pictures or
     quarantined regions, names in OCR'd running headers and footers, and names
@@ -169,16 +171,21 @@ def read_review(path: str | Path) -> tuple[frozenset[str], frozenset[str]]:
 def write_review(path: str | Path, names: dict[str, tuple[str, ...]]) -> None:
     """Write the name list for an optional check by a person.
 
-    Each line starts with what the pipeline decided on its own. Changing "drop"
-    to "keep" sweeps for that name anyway; changing "keep" to "drop" removes it
-    everywhere. With no edits, re-running gives the same result as before.
+    Each line starts with what the pipeline decided on its own:
+
+        keep    there is evidence: searched for in every written form
+        exact   no evidence: searched for only exactly as written
+
+    A person may change any line to "drop" (not a person: removed everywhere)
+    or to "keep". With no edits, re-running gives the same result as before.
     """
     lines = [
         "# One name per line: decision, name, evidence (tab-separated).",
-        "# Change 'keep' to 'drop' for anything that is not a person, or 'drop' to 'keep'. Save and re-run.",
+        "# keep = searched for in every written form; exact = only exactly as written.",
+        "# Change a line to 'drop' if it is not a person, or to 'keep' to search for all its forms. Save and re-run.",
     ]
     for name, found in sorted(names.items(), key=lambda item: (bool(item[1]), item[0].lower())):
-        lines.append(f"{'keep' if found else 'drop'}\t{name}\t{', '.join(found) or 'no supporting evidence'}")
+        lines.append(f"{'keep' if found else 'exact'}\t{name}\t{', '.join(found) or 'no supporting evidence'}")
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -194,11 +201,16 @@ def detect(
     keep and drop are a person's overrides (see write_review); both are optional.
     """
     forms: dict[str, str] = {}
+    derived: set[str] = set()  # forms that may also be matched approximately
     for name, found in candidates(docs, known).items():
-        if _key(name) in drop or not (found or _key(name) in keep):
+        if _key(name) in drop:
             continue
-        for form, rule in name_forms(name).items():
-            forms.setdefault(form, rule)
+        if found or _key(name) in keep:
+            for form, rule in name_forms(name).items():
+                forms.setdefault(form, rule)
+                derived.add(form)
+        else:
+            forms.setdefault(name, "name_exact")  # literal repeats only
     if not forms:
         return []
     # Longest first, so "First M. Last" is preferred to the "First" + "Last" inside it.
@@ -217,8 +229,10 @@ def detect(
     canonical = {_key(form): form for form in ordered}
     by_initial: dict[str, list[str]] = {}
     for form in ordered:
-        by_initial.setdefault(form[0].lower(), []).append(form.lower())
-    longest = max(len(form.split()) for form in ordered)
+        if form in derived:
+            by_initial.setdefault(form[0].lower(), []).append(form.lower())
+            by_initial.setdefault("last:" + form.split()[-1][0].lower(), []).append(form.lower())
+    longest = max((len(form.split()) for form in derived), default=0)
 
     findings: list[Finding] = []
     for doc in docs:
@@ -228,6 +242,7 @@ def detect(
             ocr = block.source is Source.OCR
             flags = (("ocr",) if ocr else ()) + (("quarantined",) if block.quarantined else ())
             taken: list[tuple[int, int]] = []
+            here: dict[tuple[int, int], Finding] = {}
             matches = [m for pattern in patterns for m in pattern.finditer(block.text)]
             for m in sorted(matches, key=lambda m: (m.start() - m.end(), m.start())):  # longest first
                 if any(a < m.end() and m.start() < b for a, b in taken):
@@ -235,11 +250,15 @@ def detect(
                 form = canonical.get(_key(m.group()))
                 rule = forms.get(form, "name_exact")
                 confidence = 0.9 if rule == "name_exact" else 0.85
-                findings.append(_finding(doc, block, m.start(), m.end(), rule, confidence, flags))
+                here[(m.start(), m.end())] = _finding(doc, block, m.start(), m.end(), rule, confidence, flags)
                 taken.append((m.start(), m.end()))
             if ocr:
-                for start, end in _fuzzy(block.text, by_initial, longest, taken):
-                    findings.append(_finding(doc, block, start, end, "name_approximate", 0.7, flags))
+                for start, end, swallowed in list(_fuzzy(block.text, by_initial, longest, taken)):
+                    for span in swallowed:
+                        here.pop(span, None)
+                    # Rated above a bare exact match: it is the longer, more complete name.
+                    here[(start, end)] = _finding(doc, block, start, end, "name_approximate", 0.92, flags)
+            findings += here.values()
     return sorted(findings, key=lambda f: (f.doc_id, f.block_id, f.start))
 
 
@@ -267,21 +286,33 @@ def _key(text: str) -> str:
 
 
 def _fuzzy(text: str, by_initial: dict[str, list[str]], longest: int, taken: list[tuple[int, int]]):
-    """Runs of words in OCR text that are nearly, but not exactly, a known name."""
+    """Runs of words in OCR text that are nearly, but not exactly, a known name.
+
+    Candidates are looked up by the first letter of the run and of its last
+    word, so a misread first letter does not hide the match. A run may contain
+    something already matched (the "Q. Sample" inside a misread "Jane Q.
+    Sample"): the longer run is the name, so it is kept and yielded with the
+    spans it swallows.
+    """
     words = [(m.start(), m.end(), m.group()) for m in _WORD.finditer(text)]
+    claimed: list[tuple[int, int]] = []
     for size in range(longest, 1, -1):
         for i in range(len(words) - size + 1):
             start, end = words[i][0], words[i + size - 1][1]
-            if any(a < end and start < b for a, b in taken):
+            if any(a < end and start < b for a, b in claimed):
                 continue
+            overlapping = [(a, b) for a, b in taken if a < end and start < b]
+            if any(not (start <= a and b <= end) or (a, b) == (start, end) for a, b in overlapping):
+                continue  # equal to, or only partly over, something already matched
             # Words must be neighbours on one line, not picked from across the text.
             if any(words[k + 1][0] - words[k][1] > 2 for k in range(i, i + size - 1)):
                 continue
             window = text[start:end].lower()
-            for candidate in by_initial.get(window[0], ()):
+            pool = by_initial.get(window[0], []) + by_initial.get("last:" + words[i + size - 1][2][0].lower(), [])
+            for candidate in dict.fromkeys(pool):
                 if abs(len(window) - len(candidate)) > 2:
                     continue
                 if SequenceMatcher(None, window, candidate, autojunk=False).ratio() >= _FUZZY:
-                    taken.append((start, end))
-                    yield start, end
+                    claimed.append((start, end))
+                    yield start, end, overlapping
                     break
