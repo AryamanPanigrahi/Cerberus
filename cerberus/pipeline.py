@@ -7,6 +7,9 @@ pass finds nothing are they moved to their final place. If it finds anything,
 they are moved to "withheld" and the run fails: nothing that failed the check
 is left where a later step could pick it up.
 
+An audit report (tokens, counts and locations; no values) is written to
+"report" either way, so there is a record of what was found.
+
 Run:  python -m cerberus.pipeline data/case2 --out outputs/run
 """
 
@@ -27,6 +30,7 @@ from .redact.docx import mask_docx
 from .redact.pdf import mask_pdf
 from .redact.pptx import mask_pptx
 from .redact.text import redact_document, redacted_text
+from .report import audit
 
 _MASKERS = {".pdf": mask_pdf, ".docx": mask_docx, ".pptx": mask_pptx}
 _ROUNDS = 3  # at most this many extra looks; verification still has the last word
@@ -39,6 +43,7 @@ class Result:
     redacted: list[Path] = field(default_factory=list)  # tokenised text, for the downstream model
     masked: list[Path] = field(default_factory=list)  # masked copies in the original formats
     problems: list[verify.Problem] = field(default_factory=list)
+    reports: list[Path] = field(default_factory=list)  # audit log and summaries: tokens and counts, no values
 
 
 def run(paths: list[Path], out: str | Path, use_ner: bool = True, review: bool = False) -> Result:
@@ -70,6 +75,20 @@ def run(paths: list[Path], out: str | Path, use_ner: bool = True, review: bool =
         if pending.exists():
             shutil.move(str(pending), str(withheld))
 
+    def report(verified: bool) -> None:
+        """Write the audit report, and check it like any other output: it must hold no value."""
+        result.reports = audit.write(out / "report", documents, tokenized, verified)
+        values = verify.known_values(tokenized)
+        leaks = [
+            verify.Problem(written.name, "raw", "report", token)
+            for written in result.reports
+            for token in verify.find_values(written.read_text(encoding="utf-8-sig"), values)
+        ]
+        if leaks:
+            shutil.rmtree(out / "report")
+            result.reports = []
+            result.problems += leaks
+
     try:
         for path, doc in zip(paths, documents):
             text = redacted_text(doc, tokenized)
@@ -88,6 +107,7 @@ def run(paths: list[Path], out: str | Path, use_ner: bool = True, review: bool =
 
     if result.problems:
         withhold()
+        report(False)  # the audit still needs to know what was found, and that nothing was released
         verify.ensure_clean(result.problems)
 
     for kind, collected in (("redacted", result.redacted), ("masked", result.masked)):
@@ -100,6 +120,8 @@ def run(paths: list[Path], out: str | Path, use_ner: bool = True, review: bool =
             shutil.move(str(item), str(destination))
             collected.append(destination)
     shutil.rmtree(pending)
+    report(True)
+    verify.ensure_clean(result.problems)  # only the report itself can have added one by now
     if (out / "withheld").exists():  # left by an earlier failed run; it no longer describes this folder
         shutil.rmtree(out / "withheld")
     return result
@@ -167,6 +189,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"{len(result.tokenized)} findings, {len({t.token for t in result.tokenized})} identities")
     for path in result.redacted + result.masked:
         print("released", path)
+    for path in result.reports:
+        print("report  ", path)
     print("verification: both checks passed on every output")
 
 

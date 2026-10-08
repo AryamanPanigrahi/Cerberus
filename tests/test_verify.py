@@ -133,6 +133,12 @@ def test_pipeline_releases_verified_outputs_for_all_three_formats(tmp_path):
     with pymupdf.open(str(tmp_path / "out" / "masked" / "policy.pdf")) as masked:
         assert "duty.manager" not in masked[0].get_text() and not (masked.metadata or {}).get("author")
     assert (tmp_path / "out" / "vault.json").exists()
+    assert [p.name for p in result.reports] == [
+        "audit.csv", "contacts.summary.md", "deck.summary.md", "policy.summary.md", "exposure.md",
+    ]
+    report = "".join(p.read_text(encoding="utf-8-sig") for p in result.reports)
+    assert "**passed**" in report and "<EMAIL_" in report
+    assert [value for value in ("j.sample", "010-0101", "helpdesk@", "duty.manager") if value in report] == []
 
 
 def test_pipeline_withholds_everything_when_an_output_is_not_clean(tmp_path, monkeypatch):
@@ -154,6 +160,8 @@ def test_pipeline_withholds_everything_when_an_output_is_not_clean(tmp_path, mon
     # Even the outputs that were fine are held back: a run is released whole or not at all.
     assert (out / "withheld" / "masked" / "contacts.docx").exists()
     assert (out / "withheld" / "masked" / "deck.pptx").exists()
+    # The audit report is still written, and says so.
+    assert "FAILED" in (out / "report" / "exposure.md").read_text(encoding="utf-8")
 
 
 def test_looking_again_finds_what_the_first_pass_missed_and_places_it_in_the_original():
