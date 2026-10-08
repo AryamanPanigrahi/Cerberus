@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -63,16 +64,23 @@ def load_predictor(model_path: str | None = None) -> tuple[Predict, str]:
     path = Path(model_path or os.environ.get("CERBERUS_NER_MODEL") or MODEL_PATH)
     if not path.is_dir():
         raise RuntimeError(f"NER model folder not found: {path} (set CERBERUS_NER_MODEL)")
+    return _load(str(path))
+
+
+@lru_cache(maxsize=2)
+def _load(path: str) -> tuple[Predict, str]:
+    """Loading takes many seconds, and one run scans several times (the
+    documents, then every output again to verify it), so it is done once."""
     os.environ.setdefault("HF_HUB_OFFLINE", "1")  # never reach for the network at run time
     from gliner import GLiNER  # imported here: it is slow to load and only this detector needs it
 
-    model = GLiNER.from_pretrained(str(path), local_files_only=True)
+    model = GLiNER.from_pretrained(path, local_files_only=True)
     model.eval()
 
     def predict(texts: list[str], labels: list[str], threshold: float) -> list[list[dict]]:
         return model.inference(texts, labels, threshold=threshold, batch_size=_BATCH)
 
-    return predict, path.name
+    return predict, Path(path).name
 
 
 def detect(
@@ -99,25 +107,34 @@ def detect(
                 located = _locate(piece, span["start"], span["end"])
                 if located is None:
                     continue
-                block, start, end = located
-                start, end = _trim(block.text, start, end)
-                if span["label"] == "person":
-                    start = _complete_left(block.text, start, end)
-                entity, value = LABELS[span["label"]], block.text[start:end]
+                block, whole_start, whole_end = located
+                entity = LABELS[span["label"]]
                 plausible = allowlist.plausible_person if entity == "PERSON" else allowlist.plausible_address
-                if not plausible(value):
-                    continue
                 flags = (("ocr",) if block.source is Source.OCR else ()) + (
                     ("quarantined",) if block.quarantined else ()
                 )
-                findings.append(
-                    make(
-                        doc, block, start, end,
-                        entity=entity, detector="ner", rule=model_name,
-                        confidence=round(float(span["score"]), 3), flags=flags,
-                        location=location_of(block, start),
+                # A line break inside a block separates entries (two names in one
+                # table cell). A person span reaching across one is two people.
+                parts = [(whole_start, whole_end)]
+                if entity == "PERSON":
+                    parts = [
+                        (whole_start + m.start(), whole_start + m.end())
+                        for m in re.finditer(r"[^\n]+", block.text[whole_start:whole_end])
+                    ]
+                for start, end in parts:
+                    start, end = _trim(block.text, start, end)
+                    if entity == "PERSON":
+                        start = _complete_left(block.text, start, end)
+                    if not plausible(block.text[start:end]):
+                        continue
+                    findings.append(
+                        make(
+                            doc, block, start, end,
+                            entity=entity, detector="ner", rule=model_name,
+                            confidence=round(float(span["score"]), 3), flags=flags,
+                            location=location_of(block, start),
+                        )
                     )
-                )
     return resolve_overlaps(findings)
 
 

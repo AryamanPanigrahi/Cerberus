@@ -236,3 +236,9 @@ def test_an_old_word_copy_that_cannot_be_matched_is_removed(tmp_path):
     raw = raw_text(mask_docx(path, doc, findings_for(doc), tmp_path / "masked.docx"))
     assert "Jane" not in raw and "mc:Fallback" not in raw
     assert "Note for &lt;PERSON_1&gt;" in raw
+
+
+def test_a_span_over_a_line_break_leaves_the_break_and_clears_both_sides():
+    pieces = ["Jane Sample", "\n", "Omar Placeholder"]
+    out = office.apply_spans(pieces, [(0, 28, "<PERSON_1>")], fixed=frozenset({1}))
+    assert out == ["<PERSON_1>", "\n", ""]

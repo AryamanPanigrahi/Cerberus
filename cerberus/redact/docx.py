@@ -100,10 +100,9 @@ def mask_docx(source: str | Path, doc: Document, tokenized: list[Tokenized], out
                 pieces.append(text)
         if "".join(pieces) != block.text:
             raise ValueError(f"{doc.name}: paragraph text no longer matches what was scanned; not written")
-        for holder, new, old in zip(holders, office.apply_spans(pieces, found), pieces):
+        fixed = frozenset(i for i, holder in enumerate(holders) if holder is None)
+        for holder, new, old in zip(holders, office.apply_spans(pieces, found, fixed), pieces):
             if new != old:
-                if holder is None:
-                    raise ValueError(f"{doc.name}: a finding runs across a tab or line break")
                 holder.text = new
                 holder.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
 

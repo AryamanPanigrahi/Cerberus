@@ -182,3 +182,9 @@ def test_a_misread_first_letter_does_not_hide_the_name():
     text = "Reviewed by lris Q. Sample on Monday."
     found = sweep(text, "Iris Q. Sample", "Q. Sample", source=Source.OCR)
     assert found == [("lris Q. Sample", "name_approximate")]
+
+
+def test_a_name_is_not_matched_across_a_line_break():
+    # Two entries in one table cell: "Jane" ends one line and "Sample" starts the next.
+    assert sweep("Mary Jane\nSample Ltd", "Jane Sample") == []
+    assert sweep("Jane   Sample", "Jane Sample") == [("Jane   Sample", "name_exact")]

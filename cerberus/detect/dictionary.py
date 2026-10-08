@@ -270,15 +270,16 @@ def _finding(doc, block, start, end, rule, confidence, flags) -> Finding:
 
 
 def _flexible(form: str) -> str:
-    """A form as a pattern: any white space between words; the dot after an
-    initial may be missing, and so may the space after it ("P.S. Last")."""
-    out = ""
+    """A form as a pattern: spaces or tabs between words, but not a line break
+    (which separates entries); the dot after an initial may be missing, and so
+    may the space after it ("P.S. Last")."""
+    gap, out = r"[^\S\n]", ""
     for word in form.split():
         if word.endswith("."):
-            out += re.escape(word[:-1]) + r"\.?\s*"
+            out += re.escape(word[:-1]) + r"\.?" + gap + "*"
         else:
-            out += re.escape(word) + r"\s+"
-    return out.removesuffix(r"\s+").removesuffix(r"\s*")
+            out += re.escape(word) + gap + "+"
+    return out.removesuffix(gap + "+").removesuffix(gap + "*")
 
 
 def _key(text: str) -> str:

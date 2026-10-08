@@ -31,13 +31,18 @@ def spans_by_block(doc: Document, tokenized: list[Tokenized]) -> dict[str, list[
     return out
 
 
-def apply_spans(pieces: list[str], spans: list[tuple[int, int, str]]) -> list[str]:
+def apply_spans(
+    pieces: list[str], spans: list[tuple[int, int, str]], fixed: frozenset[int] = frozenset()
+) -> list[str]:
     """Replace character spans of the joined text, keeping the pieces separate.
 
     pieces are the texts of a paragraph's runs, in order. The token goes into
     the first piece the span touches; the rest of the span is deleted from
     whichever pieces hold it. Pieces a span does not touch are returned as they
     were, so their formatting is undisturbed.
+
+    fixed lists pieces that cannot be changed (a tab, a line break). A span
+    crossing one leaves it in place and clears the text on both sides.
     """
     starts, position = [], 0
     for piece in pieces:
@@ -45,17 +50,19 @@ def apply_spans(pieces: list[str], spans: list[tuple[int, int, str]]) -> list[st
         position += len(piece)
     out = list(pieces)
     for start, end, token in sorted(spans, reverse=True):  # right to left: earlier offsets stay valid
-        placed = False
+        touched: list[tuple[int, int, int]] = []
         for index in range(len(pieces) - 1, -1, -1):
             lo, hi = starts[index], starts[index] + len(pieces[index])
-            if hi <= start or lo >= end or lo == hi:
+            if hi <= start or lo >= end or lo == hi or index in fixed:
                 continue
             cut_from, cut_to = max(start, lo) - lo, min(end, hi) - lo
-            first = lo <= start  # the piece where the span begins takes the token
-            out[index] = out[index][:cut_from] + (token if first else "") + out[index][cut_to:]
-            placed = placed or first
-        if not placed:
+            touched.append((index, cut_from, cut_to))
+        if not touched:
             raise ValueError("a finding does not line up with the text of its paragraph")
+        for index, cut_from, cut_to in touched:
+            # Pieces are visited last to first, so the final entry is where the span begins.
+            token_here = token if (index, cut_from, cut_to) == touched[-1] else ""
+            out[index] = out[index][:cut_from] + token_here + out[index][cut_to:]
     return out
 
 

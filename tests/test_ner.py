@@ -144,3 +144,13 @@ def test_a_name_the_model_cut_short_is_completed():
     doc.add(BlockType.PARAGRAPH, "It was signed by Jane Q. Sample yesterday.")
     doc.add(BlockType.PARAGRAPH, "The Manager Q. Sample signed it.")  # a title is not a first name
     assert [f.text for f in ner.detect([doc], cut_short, "fake")] == ["Jane Q. Sample", "Q. Sample"]
+
+
+def test_a_span_reaching_across_a_line_break_is_two_names():
+    def merged(texts, labels, threshold):
+        return [[dict(start=t.index("Jane"), end=t.index("Placeholder") + 11, label="person", score=0.4)]
+                if "Jane" in t else [] for t in texts]
+
+    doc = Document("d0c", "sample.docx", "docx")
+    doc.add(BlockType.PARAGRAPH, "Jane Sample\nOmar Placeholder")
+    assert [f.text for f in ner.detect([doc], merged, "fake")] == ["Jane Sample", "Omar Placeholder"]

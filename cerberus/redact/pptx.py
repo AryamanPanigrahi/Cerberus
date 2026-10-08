@@ -121,10 +121,9 @@ def _rewrite(frame, expected: str, spans, where: str) -> None:
             pieces.append((text.text or "") if text is not None else "\n")
     if "".join(pieces) != expected:
         raise ValueError(f"{where}: text no longer matches what was scanned; not written")
-    for holder, new, old in zip(holders, office.apply_spans(pieces, spans), pieces):
+    fixed = frozenset(i for i, holder in enumerate(holders) if holder is None)
+    for holder, new, old in zip(holders, office.apply_spans(pieces, spans, fixed), pieces):
         if new != old:
-            if holder is None:
-                raise ValueError(f"{where}: a finding runs across a line break")
             holder.text = new
 
 

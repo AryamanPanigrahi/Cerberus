@@ -8,3 +8,5 @@ numpy
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch
 gliner
+# Reading the label workbook (.xlsx) for evaluation
+openpyxl
