@@ -59,6 +59,7 @@ class Problem:
     what: str  # entity or token; never the value itself, so this can be shown and logged
     page: int | None = None  # for a re-scan finding: the page or slide it is on
     in_picture: bool = False  # for a re-scan finding: was it read from a picture?
+    picture: tuple[int, int] | None = None  # which picture: (its place among the file's pictures, how many there are)
 
 
 def known_values(tokenized: list[Tokenized]) -> dict[str, str]:
@@ -129,6 +130,7 @@ def ensure_clean(problems: list[Problem]) -> None:
 
 def _rescan(name: str, doc: Document, detect: Detect) -> list[Problem]:
     blocks = {b.block_id: b for b in doc.blocks}
+    pictures = [b.block_id for b in doc.blocks if b.type is BlockType.IMAGE_REGION]
     problems = []
     for f in detect([doc]):
         block = blocks[f.block_id]
@@ -138,7 +140,9 @@ def _rescan(name: str, doc: Document, detect: Detect) -> list[Problem]:
         if _NOTICE.fullmatch(block.text.strip()):
             continue
         where = f"page {f.page}, {f.location}" if f.page else f.location
-        problems.append(Problem(name, "rescan", where, f.entity, f.page, f.location == "image"))
+        inside = block.parent_id if f.location == "image" else None
+        picture = (pictures.index(inside), len(pictures)) if inside in pictures else None
+        problems.append(Problem(name, "rescan", where, f.entity, f.page, f.location == "image", picture))
     return problems
 
 

@@ -124,7 +124,7 @@ def summary(doc: Document, tokenized: list[Tokenized]) -> str:
     facts.append(["Pictures the engines agreed on (may be masked word by word)", len(trusted)])
     facts.append(["Pictures masked whole (not read reliably)", len(pictures) - len(trusted)])
     cover = Counter(entry[0] for b in trusted for entry in (b.native_ref or {}).get("cover", []))
-    facts.append(["Covered inside trusted pictures: words the engines disagreed on", cover["unconfirmed"]])
+    facts.append(["Words in trusted pictures the engines read differently (covered unless one read an ordinary word)", cover["unconfirmed"]])
     facts.append(["Covered inside trusted pictures: faces", cover["face"]])
     facts.append(["Covered inside trusted pictures: barcodes", cover["barcode"]])
     facts.append(["PII instances", len(items)])

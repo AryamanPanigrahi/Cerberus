@@ -6,7 +6,7 @@ the page shows. The masked copy deals with each:
 - Text: each finding is replaced by its token inside the run that holds it,
   in the body, tables, text boxes, headers, footers and notes.
 - Pictures: a picture two OCR engines read and agreed on is rebuilt from its
-  pixels with the PII, the words they disagreed on, faces and barcodes
+  pixels with the PII, anything shaped like PII, faces and barcodes
   painted over. Any other picture is replaced by a grey placeholder. Either
   way the original image is no longer referenced, so it is not written to
   the new file.

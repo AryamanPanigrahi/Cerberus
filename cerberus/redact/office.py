@@ -9,11 +9,12 @@ change, and leaving every other run, with its formatting, alone.
 from __future__ import annotations
 
 import io
+import re
 
 from PIL import Image, ImageDraw
 
 from ..detect import allowlist
-from ..extract.ir import Block, BlockType, Container, Document
+from ..extract.ir import Block, BlockType, Container, Document, Source
 from .tokens import Tokenized
 
 # File properties that name a person: replaced by a token, or emptied if no
@@ -87,6 +88,93 @@ def core_property_blocks(doc: Document) -> dict[str, Block]:
     }
 
 
+def common_words(doc: Document) -> frozenset[str]:
+    """Words this document writes in small letters, in text that can be relied on.
+
+    A word seen in small letters in the body of the document ("payment",
+    "access", "effective") is an ordinary word. Names are not written that
+    way. The list is taken from the document itself, so it needs no
+    dictionary and fits whatever the document is about. Words inside
+    pictures, hidden properties and words the OCR was unsure of are left out,
+    as is anything that is not a plain word (an e-mail address holds a name
+    in small letters).
+    """
+    words: set[str] = set()
+    for block in doc.blocks:
+        if block.container is Container.IMAGE or block.type is BlockType.METADATA or not block.text:
+            continue
+        if block.source is Source.OCR and block.words:
+            tokens = [block.text[w.start : w.end] for w in block.words if w.conf >= 0.8]
+        else:
+            tokens = block.text.split()
+        for token in tokens:
+            token = token.strip(".,;:!?()[]\"'“”‘’")
+            if len(token) > 1 and token.islower() and token.replace("-", "").isalpha():
+                words.update(part for part in token.split("-") if len(part) > 1)
+    return frozenset(words)
+
+
+_SHORT_CODE = re.compile(r"[\W_]*[A-Z]{2,5}[-./]?\d{1,4}[\W_]*")  # a reference such as a ticket or risk number
+
+
+def _harmless(text: str, common: frozenset[str]) -> bool:
+    """Could this word, as read, be left visible?
+
+    Yes for an ordinary word, a short number, a short reference code,
+    punctuation, and a scrap of one or two letters (what OCR makes of an icon
+    or a coloured square; covering it hides nothing). An ordinary word read
+    with a letter wrong is still an ordinary word, so a near match counts.
+    """
+    if "@" in text or sum(c.isdigit() for c in text) >= 5:
+        return False
+    if _SHORT_CODE.fullmatch(text):
+        return True
+    parts = [part.lower() for part in re.findall(r"[A-Za-z]+", text) if len(part) > 2]
+    return all(part in common or _near_common(part, common) for part in parts)
+
+
+def _near_common(word: str, common: frozenset[str]) -> bool:
+    """Is the word one wrong letter from an ordinary word (two, for a long word)?"""
+    if len(word) < 5:
+        return False  # too short: one letter turns most short words into another
+    allowed = 2 if len(word) >= 9 else 1
+    return any(abs(len(known) - len(word)) <= allowed and _edits(word, known, allowed) <= allowed for known in common)
+
+
+def _edits(a: str, b: str, limit: int) -> int:
+    """Letters to insert, delete or replace to turn a into b; limit + 1 if more."""
+    previous = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        current = [i]
+        for j, y in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (x != y)))
+        if min(current) > limit:
+            return limit + 1
+        previous = current
+    return previous[-1]
+
+
+def _segments(block: Block) -> list[tuple[int, int]]:
+    """A line read from a picture, cut where the words are far apart.
+
+    A line across a table or a chart joins cells that have nothing to do with
+    each other. Shapes are looked for within one stretch of neighbouring
+    words, so a row of five numbers is not taken for a phone number.
+    """
+    words = sorted(block.words, key=lambda w: w.start)
+    if not words:
+        return [(0, len(block.text))]
+    heights = sorted(w.bbox.y1 - w.bbox.y0 for w in words)
+    wide = 2.0 * heights[len(heights) // 2]
+    pieces = [[words[0].start, words[0].end]]
+    for previous, word in zip(words, words[1:]):
+        if word.bbox.x0 - previous.bbox.x1 > wide or word.bbox.y0 > previous.bbox.y1:
+            pieces.append([word.start, word.end])
+        else:
+            pieces[-1][1] = word.end
+    return [(a, b) for a, b in pieces]
+
+
 def picture_boxes(doc: Document, tokenized: list[Tokenized], pictures: str = "findings") -> dict[str, list | None]:
     """For every picture: the rectangles to cover in it, or None to mask it whole.
 
@@ -95,13 +183,23 @@ def picture_boxes(doc: Document, tokenized: list[Tokenized], pictures: str = "fi
     in a DOCX or PPTX).
 
     A picture is masked word by word only if extraction marked it trusted: two
-    OCR engines read it and agreed on enough of it. Then four things are
-    covered: every finding inside it; every word the engines did not agree on
-    (it may be a name one of them misread); anything with the shape of
-    personal data, detected or not (a name-like run of words, an "@", four or
-    more digits); and any face or barcode. Anything less certain is masked
-    whole, as is everything when pictures="whole".
+    OCR engines read it and agreed on enough of it. Then four things are covered:
+
+    - every finding inside it;
+    - anything with the shape of personal data in either engine's reading,
+      detected or not (allowlist.shaped_like_pii);
+    - a word the engines read differently, unless one of them read an
+      ordinary word there. Two readings that differ and are both nonsense
+      are what a name or an address under a stamp looks like;
+    - any face or barcode.
+
+    Anything less certain is masked whole, as is everything when pictures="whole".
+
+    Covering every word the engines disagreed on was tried first. On a scanned
+    form it hid over a hundred harmless words, most of the text. "Ordinary
+    word" is decided from the document itself: see common_words.
     """
+    common = common_words(doc)
     plans: dict[str, list | None] = {}
     for block in doc.blocks:
         if block.type is not BlockType.IMAGE_REGION:
@@ -109,12 +207,32 @@ def picture_boxes(doc: Document, tokenized: list[Tokenized], pictures: str = "fi
         ref = block.native_ref or {}
         if pictures == "whole" or block.quarantined or not ref.get("trusted"):
             plans[block.block_id] = None
-        else:
-            plans[block.block_id] = [tuple(entry[1:]) for entry in ref.get("cover", [])]
+            continue
+        plans[block.block_id] = [tuple(entry[1:]) for entry in ref.get("cover", []) if entry[0] != "unconfirmed"]
+        doubtful = {tuple(round(v, 2) for v in entry[1:]) for entry in ref.get("cover", []) if entry[0] == "unconfirmed"}
+        read = [  # every word read in this picture: (engine, text, box)
+            ((line.native_ref or {}).get("engine"), line.text[w.start : w.end], w.bbox)
+            for line in doc.children(block.block_id) for w in line.words
+        ]
+        for engine, text, box in read:
+            if (round(box.x0, 2), round(box.y0, 2), round(box.x1, 2), round(box.y1, 2)) not in doubtful:
+                continue
+            if _harmless(text, common):
+                continue
+            # The other engine may have read an ordinary word in the same place.
+            excused = any(
+                other != engine and len(re.sub(r"[^A-Za-z]", "", theirs)) >= 3 and _harmless(theirs, common)
+                and _shared(box, place) > 0.5
+                for other, theirs, place in read
+            )
+            if not excused:
+                plans[block.block_id].append((box.x0, box.y0, box.x1, box.y1))
     for block in doc.blocks:
         if block.container is Container.IMAGE and block.text and plans.get(block.parent_id) is not None:
-            for start, end in allowlist.shaped_like_pii(block.text):
-                plans[block.parent_id] += [(b.x0, b.y0, b.x1, b.y1) for b in block.span_boxes(start, end)]
+            for begin, end in _segments(block):
+                for start, stop in allowlist.shaped_like_pii(block.text[begin:end], common):
+                    boxes = block.span_boxes(begin + start, begin + stop)
+                    plans[block.parent_id] += [(b.x0, b.y0, b.x1, b.y1) for b in boxes]
     for item in tokenized:
         f = item.finding
         if f.doc_id != doc.doc_id or f.location != "image":
@@ -128,6 +246,14 @@ def picture_boxes(doc: Document, tokenized: list[Tokenized], pictures: str = "fi
             continue
         plans[block.parent_id] += [(b.x0, b.y0, b.x1, b.y1) for b in boxes]
     return plans
+
+
+def _shared(a, b) -> float:
+    """Share of the smaller box that lies inside the other."""
+    across, down = min(a.x1, b.x1) - max(a.x0, b.x0), min(a.y1, b.y1) - max(a.y0, b.y0)
+    if across <= 0 or down <= 0:
+        return 0.0
+    return across * down / max(1e-9, min((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0)))
 
 
 def pictures_by_key(doc: Document, plans: dict[str, list | None], key) -> dict:

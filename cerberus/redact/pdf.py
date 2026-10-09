@@ -8,8 +8,8 @@ The token is then written in the cleared space.
 What is masked:
 
 - every finding, at the boxes of the words it covers;
-- inside a figure that two OCR engines read and agreed on: every finding, every
-  word the engines disagreed on, and any face or barcode. No token is written
+- inside a figure that two OCR engines read and agreed on: every finding,
+  anything shaped like personal data, words neither engine could read, and any face or barcode. No token is written
   inside a picture: a label there would be read back as text by the next OCR;
 - every other figure, as a whole region;
 - every quarantined page, entirely.

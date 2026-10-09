@@ -123,6 +123,21 @@ def run(
         report(False)  # the audit still needs to know what was found, and that nothing was released
         verify.ensure_clean(result.problems)
 
+    # Clear the way first. An earlier output left open in a viewer cannot be replaced,
+    # and finding that out halfway would leave old and new outputs side by side.
+    locked = []
+    for kind in ("redacted", "masked"):
+        for item in (pending / kind).iterdir():
+            try:
+                (out / kind / item.name).unlink(missing_ok=True)
+            except PermissionError:
+                locked.append(str(out / kind / item.name))
+    if locked:
+        raise RuntimeError(
+            "Verified, but not released: close these files and run again (the new outputs are in "
+            f"{pending}): " + ", ".join(locked)
+        )
+
     for kind, collected in (("redacted", result.redacted), ("masked", result.masked)):
         final = out / kind
         final.mkdir(parents=True, exist_ok=True)
@@ -145,17 +160,26 @@ def distrust_pictures(doc: Document, problems: list[verify.Problem]) -> bool:
 
     Masking a picture word by word is an attempt. If the masked picture, read
     again, still shows PII, the attempt failed and the picture is masked
-    whole: on a PDF every picture on that page, in a DOCX or PPTX (where a
-    re-scan finding cannot be tied to one page) every picture in the file.
+    whole. On a PDF that is every picture on the page. In a DOCX or PPTX it
+    is that one picture, found by its place among the file's pictures, which
+    masking does not change; if the count differs, every picture in the file.
     Returns whether anything changed, so the caller knows to write the file again.
     """
-    pages = {p.page for p in problems if p.check == "rescan" and p.in_picture}
-    if not pages:
+    failed = [p for p in problems if p.check == "rescan" and p.in_picture]
+    if not failed:
         return False
+    regions = [b for b in doc.blocks if b.type is BlockType.IMAGE_REGION]
+    if doc.format == "pdf":
+        pages = {p.page for p in failed}
+        chosen = [b for b in regions if b.page in pages]
+    elif all(p.picture is not None and p.picture[1] == len(regions) for p in failed):
+        chosen = [regions[p.picture[0]] for p in failed]
+    else:
+        chosen = regions
     changed = False
-    for block in doc.blocks:
+    for block in chosen:
         ref = block.native_ref or {}
-        if block.type is BlockType.IMAGE_REGION and ref.get("trusted") and (doc.format != "pdf" or block.page in pages):
+        if ref.get("trusted"):
             block.native_ref = {**ref, "trusted": False, "fallback": "PII still readable after word-level masking"}
             changed = True
     return changed

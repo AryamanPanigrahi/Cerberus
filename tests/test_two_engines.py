@@ -158,20 +158,69 @@ def test_shapes_covered_inside_pictures_whether_detected_or_not():
 
     assert shapes("Owner J. Q. Sample signed") == ["J. Q. Sample"]  # the title in front does not hide the name
     assert shapes("Write to j.sample@corp.example today") == ["j.sample@corp.example"]
-    assert shapes("Call 555 010 0101 or see page 12") == ["0101", "555 010 0101"]
+    assert shapes("Call 555 010 0101 or see page 12") == ["555 010 0101"]
+    assert shapes("Staff EMP-00001, born 01/02/1980") == ["01/02/1980", "EMP-00001,"]
+    # A short reference code, a year and a count are not personal data.
+    assert shapes("REF-0042 raised in 2026 for 1200 items, see section 12.4") == []
     assert {"28 February 1979", "3rd Mar 2020"} <= set(shapes("Born 28 February 1979, joined 3rd Mar 2020"))
     assert shapes("Jane Sample\nOmar Placeholder") == ["Jane Sample", "Omar Placeholder"]
     assert shapes("Executive attestation and Risk Owner") == []
 
 
-def test_a_trusted_picture_is_covered_at_findings_doubtful_words_and_nothing_else():
+def test_a_trusted_picture_is_covered_at_findings_and_pii_shapes_and_nothing_else():
     doc, region, found = picture_document()
     tokenized, _ = tokens.assign(merge.one_per_place([doc], found))
     boxes = office.picture_boxes(doc, tokenized)[region.block_id]
-    # The finding, the wider reading that was dropped as its duplicate, and the word the engines disagreed on.
-    assert {(62, 40, 120, 52), (124, 40, 150, 52), (44, 40, 150, 52), (300.0, 150.0, 380.0, 170.0)} <= set(boxes)
-    assert all(40 <= box[1] and box[3] <= 52 or box[0] == 300.0 for box in boxes)  # and nothing anywhere else
+    # The finding, and the wider reading that was dropped as its duplicate.
+    assert {(62, 40, 120, 52), (124, 40, 150, 52), (44, 40, 150, 52)} <= set(boxes)
+    # A word the engines merely read differently is not covered, nor is anything else.
+    assert all(40 <= box[1] and box[3] <= 52 for box in boxes)
     assert office.picture_boxes(doc, tokenized, pictures="whole") == {region.block_id: None}
+
+
+def test_ordinary_words_come_from_the_document_itself():
+    doc = Document("d0c", "policy.pdf", "pdf")
+    doc.add(BlockType.PARAGRAPH, "Payment processing is effective; write to j.sample@corp.example. Jane Sample agreed.")
+    box = BBox(0, 0, 1, 1, Unit.PT)
+    doc.add(BlockType.PARAGRAPH, "third-party access qzxv", source=Source.OCR,
+            words=[Word(0, 11, box, 0.9), Word(12, 18, box, 0.9), Word(19, 23, box, 0.3)])
+    picture = doc.add(BlockType.IMAGE_REGION, container=Container.IMAGE)
+    doc.add(BlockType.PARAGRAPH, "hidden words", container=Container.IMAGE, parent_id=picture.block_id)
+    common = office.common_words(doc)
+    # Small-letter words from reliable text; nothing from an address, a name, a picture or an unsure reading.
+    assert common == {"processing", "is", "effective", "write", "to", "agreed", "third", "party", "access"}
+
+    assert office._harmless("Effective", common) and office._harmless("processlng,", common)  # one letter misread
+    assert office._harmless("REF-0042", common) and office._harmless("2026", common) and office._harmless("ml", common)
+    assert not office._harmless("Sample", common) and not office._harmless("jsamplecorpexample", common)
+    assert not office._harmless("j.sample@corp.example", common) and not office._harmless("EMP-00001", common)
+
+
+def test_a_word_the_engines_disagree_on_is_covered_unless_one_read_an_ordinary_word():
+    doc = Document("d0c", "form.pdf", "pdf")
+    doc.add(BlockType.PARAGRAPH, "the payment was approved after review")
+
+    def box(x):
+        return BBox(x, 10, x + 60, 22, Unit.PT)
+
+    doubtful = [["unconfirmed", x, 10, x + 60, 22] for x in (0, 100, 200, 300)]
+    region = doc.add(BlockType.IMAGE_REGION, container=Container.IMAGE, page=1,
+                     native_ref={"trusted": True, "cover": doubtful})
+
+    def line(text, engine, xs):
+        words, at = [], 0
+        for piece, x in zip(text.split(), xs):
+            words.append(Word(at, at + len(piece), box(x), 0.9))
+            at += len(piece) + 1
+        doc.add(BlockType.PARAGRAPH, text, container=Container.IMAGE, source=Source.OCR, page=1,
+                parent_id=region.block_id, words=words, native_ref={"engine": engine})
+
+    line("paymert zqxwv REF-0042 vkjqz", "tesseract", (0, 100, 200, 300))
+    line("payment zqxvw REF-0043 approved", "doctr", (0, 100, 200, 300))
+    covered = sorted({b[0] for b in office.picture_boxes(doc, [])[region.block_id]})
+    # Only the place where both readings are nonsense. A misread ordinary word, a short
+    # code and a place where one engine read an ordinary word are all left visible.
+    assert covered == [100]
 
 
 @pytest.mark.parametrize("change", [{"trusted": False}, {"quarantined": True}])
@@ -248,6 +297,20 @@ def test_a_picture_that_still_shows_pii_after_masking_stops_being_trusted():
     assert not region.native_ref["trusted"] and "fallback" in region.native_ref
     assert other.native_ref["trusted"]  # a picture on another page of a PDF is left alone
     assert not pipeline.distrust_pictures(doc, [in_picture])  # nothing left to change
+
+
+def test_in_an_office_file_only_the_picture_that_failed_stops_being_trusted():
+    deck = Document("d3ck", "deck.pptx", "pptx")
+    first, second, third = (
+        deck.add(BlockType.IMAGE_REGION, container=Container.IMAGE, page=1, native_ref={"trusted": True}) for _ in range(3)
+    )
+    problem = verify.Problem("deck.pptx", "rescan", "page 1, image", "PERSON", 1, True, picture=(1, 3))
+    assert pipeline.distrust_pictures(deck, [problem])
+    assert [b.native_ref["trusted"] for b in (first, second, third)] == [True, False, True]
+    # If the masked file does not have the same pictures, there is no telling which one: all of them.
+    unclear = verify.Problem("deck.pptx", "rescan", "page 1, image", "PERSON", 1, True, picture=(0, 5))
+    assert pipeline.distrust_pictures(deck, [unclear])
+    assert [b.native_ref["trusted"] for b in (first, second, third)] == [False, False, False]
 
 
 # --- the real engine --------------------------------------------------------
