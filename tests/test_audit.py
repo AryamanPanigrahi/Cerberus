@@ -62,7 +62,7 @@ def test_file_summary_counts_by_category_location_and_page():
     docs, tokenized = sample()
     text = audit.summary(docs[0], tokenized)
     assert "| Pages read by OCR | 2 (1-2) |" in text
-    assert "| Pictures the OCR could not read reliably | 1 |" in text
+    assert "| Pictures masked whole (not read reliably) | 1 |" in text
     assert "| PERSON | 2 | 2 | 0 | 0 | 1 | 1 |" in text
     assert "| **All** | 3 | 3 | 0 | 0 | 2 | 1 |" in text
     assert "| 1 | 2 | 0 | 0 | 2 | 0 |" in text and "| 2 | 1 | 0 | 0 | 0 | 1 |" in text

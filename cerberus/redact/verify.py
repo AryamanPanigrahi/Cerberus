@@ -57,6 +57,8 @@ class Problem:
     check: str  # "rescan" or "raw"
     where: str  # page, block or part
     what: str  # entity or token; never the value itself, so this can be shown and logged
+    page: int | None = None  # for a re-scan finding: the page or slide it is on
+    in_picture: bool = False  # for a re-scan finding: was it read from a picture?
 
 
 def known_values(tokenized: list[Tokenized]) -> dict[str, str]:
@@ -136,7 +138,7 @@ def _rescan(name: str, doc: Document, detect: Detect) -> list[Problem]:
         if _NOTICE.fullmatch(block.text.strip()):
             continue
         where = f"page {f.page}, {f.location}" if f.page else f.location
-        problems.append(Problem(name, "rescan", where, f.entity))
+        problems.append(Problem(name, "rescan", where, f.entity, f.page, f.location == "image"))
     return problems
 
 

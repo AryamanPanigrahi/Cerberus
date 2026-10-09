@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..extract.ir import Document
 from .finding import Finding
-from .merge import resolve_overlaps
+from .merge import one_per_place, resolve_overlaps
 
 
 def detect(docs: list[Document], use_ner: bool = True, review: str | Path | None = None) -> list[Finding]:
@@ -14,7 +14,8 @@ def detect(docs: list[Document], use_ner: bool = True, review: str | Path | None
 
     Each detector sees the untouched text. Nothing is redacted between them:
     removing an e-mail address first would take away the words a name detector
-    relies on. Overlaps are settled once, at the end.
+    relies on. Overlaps are settled once, at the end, and a value two OCR
+    engines both read in a picture is reported once.
 
     review is an optional file for a person to check the list of names. If it
     does not exist it is written; if it does, its decisions are applied. The
@@ -37,4 +38,4 @@ def detect(docs: list[Document], use_ner: bool = True, review: str | Path | None
         findings += people
         # Names with independent evidence are now searched for everywhere.
         findings += dictionary.detect(docs, findings, keep, drop)
-    return resolve_overlaps(findings)
+    return one_per_place(docs, resolve_overlaps(findings))

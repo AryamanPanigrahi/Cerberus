@@ -24,7 +24,8 @@ from . import detect as detection
 from .detect.finding import Finding
 from .detect.merge import resolve_overlaps
 from .extract import extract
-from .extract.ir import Document
+from .extract import images
+from .extract.ir import BlockType, Document
 from .redact import tokens, verify
 from .redact.docx import mask_docx
 from .redact.pdf import mask_pdf
@@ -46,8 +47,13 @@ class Result:
     reports: list[Path] = field(default_factory=list)  # audit log and summaries: tokens and counts, no values
 
 
-def run(paths: list[Path], out: str | Path, use_ner: bool = True, review: bool = False) -> Result:
+def run(
+    paths: list[Path], out: str | Path, use_ner: bool = True, review: bool = False, pictures: str = "findings"
+) -> Result:
     """Process the files together and release the outputs only if they verify clean.
+
+    pictures="findings" masks a picture word by word where two OCR engines
+    agreed on it, and whole otherwise; "whole" masks every picture whole.
 
     Raises verify.VerificationError, after moving the outputs to out/withheld,
     if any PII is found in them.
@@ -60,6 +66,7 @@ def run(paths: list[Path], out: str | Path, use_ner: bool = True, review: bool =
     def detect(docs):
         return detection.detect(docs, use_ner=use_ner)
 
+    images.use_cache(out / "cache")  # readings of pictures: reused when the same file is run again
     documents = [extract(path) for path in paths]
     found = detection.detect(documents, use_ner=use_ner, review=out / "review" / "names.txt" if review else None)
     found = look_again(documents, found, detect)
@@ -99,8 +106,14 @@ def run(paths: list[Path], out: str | Path, use_ner: bool = True, review: bool =
                 target.name, text, tokenized, detect, blocks=redact_document(doc, tokenized)
             )
 
-            masked = _MASKERS[path.suffix.lower()](path, doc, tokenized, pending / "masked" / path.name)
-            result.problems += verify.check_file(masked, tokenized, detect)
+            mask = _MASKERS[path.suffix.lower()]
+            masked = mask(path, doc, tokenized, pending / "masked" / path.name, pictures=pictures)
+            problems = verify.check_file(masked, tokenized, detect)
+            if problems and distrust_pictures(doc, problems):
+                # Something was still read in a picture masked word by word: mask it whole and check again.
+                masked = mask(path, doc, tokenized, pending / "masked" / path.name, pictures=pictures)
+                problems = verify.check_file(masked, tokenized, detect)
+            result.problems += problems
     except Exception:
         withhold()  # a writer refused, or something broke: half-finished outputs are not left lying about
         raise
@@ -125,6 +138,27 @@ def run(paths: list[Path], out: str | Path, use_ner: bool = True, review: bool =
     if (out / "withheld").exists():  # left by an earlier failed run; it no longer describes this folder
         shutil.rmtree(out / "withheld")
     return result
+
+
+def distrust_pictures(doc: Document, problems: list[verify.Problem]) -> bool:
+    """Stop trusting the pictures in which the re-scan still found something.
+
+    Masking a picture word by word is an attempt. If the masked picture, read
+    again, still shows PII, the attempt failed and the picture is masked
+    whole: on a PDF every picture on that page, in a DOCX or PPTX (where a
+    re-scan finding cannot be tied to one page) every picture in the file.
+    Returns whether anything changed, so the caller knows to write the file again.
+    """
+    pages = {p.page for p in problems if p.check == "rescan" and p.in_picture}
+    if not pages:
+        return False
+    changed = False
+    for block in doc.blocks:
+        ref = block.native_ref or {}
+        if block.type is BlockType.IMAGE_REGION and ref.get("trusted") and (doc.format != "pdf" or block.page in pages):
+            block.native_ref = {**ref, "trusted": False, "fallback": "PII still readable after word-level masking"}
+            changed = True
+    return changed
 
 
 def look_again(documents: list[Document], found: list[Finding], detect, rounds: int = _ROUNDS) -> list[Finding]:
@@ -178,12 +212,14 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", default="outputs/run")
     parser.add_argument("--no-ner", action="store_true", help="rules only: fast, but finds no names")
     parser.add_argument("--review", action="store_true", help="write or apply the name review file")
+    parser.add_argument("--pictures", choices=("findings", "whole"), default="findings",
+                        help="findings: mask PII inside pictures that two OCR engines agree on; whole: mask every picture")
     args = parser.parse_args(argv)
 
     source = Path(args.source)
     paths = sorted(p for p in source.iterdir() if p.suffix.lower() in _MASKERS) if source.is_dir() else [source]
     try:
-        result = run(paths, args.out, use_ner=not args.no_ner, review=args.review)
+        result = run(paths, args.out, use_ner=not args.no_ner, review=args.review, pictures=args.pictures)
     except verify.VerificationError as error:
         raise SystemExit(f"FAILED VERIFICATION\n{error}")
     print(f"{len(result.tokenized)} findings, {len({t.token for t in result.tokenized})} identities")

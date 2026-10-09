@@ -125,9 +125,10 @@ def _emit_metadata(doc: Document, pdf) -> None:
 
 
 class _Figure:
-    def __init__(self, frame, lines: list[layout.Line]):
+    def __init__(self, frame, reading: images.Reading, scale: float):
         self.frame = frame  # (x0, y0, x1, y1) in page pixels at the OCR resolution
-        self.lines = lines  # words already mapped back to those page pixels
+        self.reading = reading  # what was read, in the cut-out's own pixels
+        self.scale = scale  # cut-out pixels -> page pixels
         self.y0 = frame[1]
 
 
@@ -145,19 +146,10 @@ def _read_figure(page, frame, dpi: int) -> _Figure:
     )
     native = int(min(600, max(72, round(native))))
     clip = pymupdf.Rect(*frame) * (72 / dpi)
-    pixmap = page.get_pixmap(dpi=native, colorspace=pymupdf.csGRAY, clip=clip)
-    cutout = Image.frombytes("L", (pixmap.width, pixmap.height), pixmap.samples)
-    k = dpi / native  # cut-out pixels -> page pixels
-    words = [
-        ocr.OcrWord(
-            w.text,
-            frame[0] + w.x0 * k, frame[1] + w.y0 * k,
-            frame[0] + w.x1 * k, frame[1] + w.y1 * k,
-            w.conf, w.line,
-        )
-        for w in images.read_pixels(cutout, border=6)  # 6: skip the frame itself
-    ]
-    return _Figure(frame, layout.build_lines(words))
+    pixmap = page.get_pixmap(dpi=native, colorspace=pymupdf.csRGB, clip=clip)
+    cutout = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+    reading = images.examine(cutout.convert("L"), border=6, colour=cutout)  # 6: skip the frame itself
+    return _Figure(frame, reading, dpi / native)
 
 
 def _furniture(scanned: dict[int, list[layout.Line]], heights: dict[int, float]) -> dict:
@@ -230,25 +222,23 @@ class _Emitter:
                 self.doc.add(BlockType.FOOTER, page=page, **self._ocr_fields(line.words))
 
     def _figure(self, figure: _Figure, page: int) -> None:
-        """An image region, with one child block per line of text read inside it."""
-        k = self.k
-        words = [w for line in figure.lines for w in line.words]
-        weight = sum(len(w.text) for w in words)
-        conf = sum(w.conf * len(w.text) for w in words) / weight if words else None
+        """An image region, with one child block per line of text each engine read inside it."""
+        k, frame, scale = self.k, figure.frame, figure.scale
         # Unreadable is not the same as empty: a figure we cannot read may still
-        # hold personal data, so it is masked whole and kept from downstream.
-        bad = conf is not None and conf < MIN_FIGURE_CONFIDENCE
+        # hold personal data. images.emit quarantines it, so that it is masked
+        # whole and kept from downstream.
         region = self.doc.add(
             BlockType.IMAGE_REGION, page=page, container=Container.IMAGE, source=Source.OCR,
-            bbox=BBox(*(v * k for v in figure.frame), Unit.PT), ocr_conf=conf, quarantined=bad,
-            **self._context(),
+            bbox=BBox(*(v * k for v in frame), Unit.PT), **self._context(),
         )
-        for line in figure.lines:
-            self.doc.add(
-                BlockType.PARAGRAPH, page=page, container=Container.IMAGE, quarantined=bad,
-                parent_id=region.block_id, section_path=region.section_path,
-                **self._ocr_fields(line.words),
+
+        def place(x0, y0, x1, y1):  # cut-out pixels -> page pixels -> points
+            return BBox(
+                (frame[0] + x0 * scale) * k, (frame[1] + y0 * scale) * k,
+                (frame[0] + x1 * scale) * k, (frame[1] + y1 * scale) * k, Unit.PT,
             )
+
+        images.emit(self.doc, region, figure.reading, place)
 
     def _table(self, region: layout.TableRegion, page: int) -> None:
         k = self.k

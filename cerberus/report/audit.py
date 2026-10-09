@@ -118,8 +118,15 @@ def summary(doc: Document, tokenized: list[Tokenized]) -> str:
         facts.append([f"{unit.capitalize()}s read by OCR", f"{len(doc.ocr_pages())} ({_ranges(doc.ocr_pages())})"])
         withheld = [p.number for p in doc.pages if p.quarantined]
         facts.append([f"{unit.capitalize()}s withheld whole (unreadable)", f"{len(withheld)} ({_ranges(withheld)})"])
-    facts.append(["Pictures (all masked whole)", len(pictures)])
-    facts.append(["Pictures the OCR could not read reliably", sum(b.quarantined for b in pictures)])
+    trusted = [b for b in pictures if (b.native_ref or {}).get("trusted") and not b.quarantined]
+    facts.append(["Pictures", len(pictures)])
+    facts.append(["Pictures read by two OCR engines", sum(len((b.native_ref or {}).get("engines", [])) > 1 for b in pictures)])
+    facts.append(["Pictures the engines agreed on (may be masked word by word)", len(trusted)])
+    facts.append(["Pictures masked whole (not read reliably)", len(pictures) - len(trusted)])
+    cover = Counter(entry[0] for b in trusted for entry in (b.native_ref or {}).get("cover", []))
+    facts.append(["Covered inside trusted pictures: words the engines disagreed on", cover["unconfirmed"]])
+    facts.append(["Covered inside trusted pictures: faces", cover["face"]])
+    facts.append(["Covered inside trusted pictures: barcodes", cover["barcode"]])
     facts.append(["PII instances", len(items)])
     facts.append(["Distinct identities", len({t.token for t in items})])
     lines += _table(["", ""], facts) + [""]
@@ -185,8 +192,8 @@ def exposure(docs: list[Document], tokenized: list[Tokenized], verified: bool | 
               "Reading text alone would not have found them.", ""]
     if hidden:
         lines += _table(["Category", "Identities"], sorted(kinds.items(), key=lambda pair: (-pair[1], pair[0]))) + [""]
-    lines += ["Text inside a picture is read with less certainty than typed text, so every picture is masked whole "
-              "and its text is never passed downstream. This list may therefore be incomplete.", ""]
+    lines += ["Text inside a picture is read with less certainty than typed text. It is never passed downstream, "
+              "and a picture is masked whole unless two OCR engines agreed on it. This list may be incomplete.", ""]
     return "\n".join(lines)
 
 

@@ -5,8 +5,11 @@ the page shows. The masked copy deals with each:
 
 - Text: each finding is replaced by its token inside the run that holds it,
   in the body, tables, text boxes, headers, footers and notes.
-- Pictures: every picture is replaced by a grey placeholder. The original
-  image is no longer referenced, so it is not written to the new file.
+- Pictures: a picture two OCR engines read and agreed on is rebuilt from its
+  pixels with the PII, the words they disagreed on, faces and barcodes
+  painted over. Any other picture is replaced by a grey placeholder. Either
+  way the original image is no longer referenced, so it is not written to
+  the new file.
 - Second copies: a text box is stored twice, once for current Word and once
   for Word 2007 and older. Only the current copy is scanned, so after it has
   been masked its contents are copied over the old one: both stay in the
@@ -56,7 +59,9 @@ _SKIP = {_w("pPr"), _w("rPr"), _w("instrText"), _w("drawing"), _w("pict"), _w("o
 _FIXED = {_w("tab"): "\t", _w("br"): "\n", _w("cr"): "\n", _w("noBreakHyphen"): "-"}
 
 
-def mask_docx(source: str | Path, doc: Document, tokenized: list[Tokenized], out: str | Path) -> Path:
+def mask_docx(
+    source: str | Path, doc: Document, tokenized: list[Tokenized], out: str | Path, pictures: str = "findings"
+) -> Path:
     """Write a masked copy of `source` to `out`. `doc` is the extraction of the same file."""
     spans = office.spans_by_block(doc, tokenized)
     src = docx.Document(str(source))
@@ -106,10 +111,9 @@ def mask_docx(source: str | Path, doc: Document, tokenized: list[Tokenized], out
                 holder.text = new
                 holder.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
 
-    sizes = {
-        (b.native_ref["part"], b.native_ref.get("rid")): tuple(b.native_ref.get("pixels") or ()) or None
-        for b in doc.blocks if b.type is BlockType.IMAGE_REGION and "part" in (b.native_ref or {})
-    }
+    sizes = office.pictures_by_key(
+        doc, office.picture_boxes(doc, tokenized, pictures), lambda ref: (ref.get("part"), ref.get("rid"))
+    )
     flagged_links = {b.text for b in doc.blocks if b.type is BlockType.METADATA and spans.get(b.block_id)}
     for name, part in parts.items():
         if not re.fullmatch(r"/word/[^/]+\.xml", name) or name in ("/word/styles.xml", "/word/numbering.xml"):
@@ -207,7 +211,10 @@ def _mask_pictures(part, root, name: str, sizes: dict) -> None:
         if rel is None or rel.is_external:
             continue  # linked, not embedded: nothing in the file to replace
         if hasattr(part, "get_or_add_image"):
-            new, _ = part.get_or_add_image(io.BytesIO(office.placeholder(sizes.get((name, rid)))))
+            boxes, size = sizes.get((name, rid), (None, None))  # a picture extraction did not see is masked whole
+            original = rel.target_part
+            masked = office.covered_picture(original.blob, original.content_type, boxes, size)
+            new, _ = part.get_or_add_image(io.BytesIO(masked))
             blip.set(attribute, new)
             for extra in blip.findall(f"{{{_A}}}extLst"):
                 blip.remove(extra)  # an SVG twin of the picture would be referenced from here

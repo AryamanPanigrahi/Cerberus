@@ -100,3 +100,42 @@ def plausible_address(text: str) -> bool:
     is what a model offers when asked for addresses, and is not one.
     """
     return bool(_STREET_LINE.search(text) or _POSTCODE.search(text))
+
+
+_NAME_RUN = re.compile(r"(?:\b[A-Z][A-Za-z'’-]*\.?[^\S\n]+){1,4}[A-Z][A-Za-z'’-]+")
+_CODE = re.compile(r"\S*(?:@|\d[^\d\s]*\d[^\d\s]*\d[^\d\s]*\d)\S*")  # one word: an "@", or four digits
+_NUMBER_RUN = re.compile(r"[+(]?\d[\d ().\-/]{2,}\d")  # digits in groups: a phone number, a date
+
+
+_WRITTEN_DATE = re.compile(
+    r"\b\d{1,2}(?:st|nd|rd|th)?[ .,/-]+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?,?[ .,/-]+\d{2,4}\b",
+    re.IGNORECASE,
+)
+
+
+def shaped_like_pii(text: str) -> list[tuple[int, int]]:
+    """Spans that have the shape of personal data, whether or not a detector reported them.
+
+    Used only inside pictures, where the cost of a miss is a value left
+    visible and the cost of a false alarm is a grey box over a harmless word.
+    The shapes: anything with an "@", anything with four or more digits (an
+    identifier, a phone number, a date), a date written with the month's name,
+    and a run of capitalised words or initials that passes the same test a
+    detected name must pass.
+    """
+    spans = [match.span() for match in _CODE.finditer(text)]
+    spans += [m.span() for m in _NUMBER_RUN.finditer(text) if sum(c.isdigit() for c in m.group()) >= 4]
+    spans += [match.span() for match in _WRITTEN_DATE.finditer(text)]
+    for match in _NAME_RUN.finditer(text):
+        # A title in front of a name ("Owner J. Q. Sample") must not hide the name:
+        # try the run without its first words, then without its last, longest first.
+        words = list(re.finditer(r"\S+", match.group()))
+        pieces = sorted(
+            ((words[i].start(), words[j].end()) for i in range(len(words)) for j in range(i + 1, len(words))),
+            key=lambda piece: piece[0] - piece[1],
+        )
+        for start, end in pieces:
+            if plausible_person(match.group()[start:end]):
+                spans.append((match.start() + start, match.start() + end))
+                break
+    return sorted(spans)

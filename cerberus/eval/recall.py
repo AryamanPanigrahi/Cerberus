@@ -24,12 +24,17 @@ Everything that holds a value is written to the output folder (gitignored).
 Only counts are printed.
 
 Run:  python -m cerberus.eval.recall <document> --labels <workbook.xlsx> --sheet <tab>
+
+With --compare-ocr the document is processed twice, once reading pictures with
+Tesseract alone and once with Tesseract and docTR together, and the two are
+set side by side. Add --location image to score only what is inside pictures.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -262,6 +267,41 @@ def write_report(folder: str | Path, doc: Document, outcomes: list[Outcome], unm
     return written + [folder / "unmatched_findings.csv", folder / "summary.txt"]
 
 
+def comparison(runs: dict[str, list[Outcome]]) -> str:
+    """Two or more runs over the same labels, side by side. Counts only."""
+    names = list(runs)
+    lines = [f"  {'':<22}" + "".join(f"{name:>24}" for name in names)]
+
+    def row(title: str, count) -> None:
+        cells = []
+        for name in names:
+            n = len(runs[name])
+            cells.append(f"{count(runs[name]):>4} of {n:<4}{_share(count(runs[name]), n):>8}    ")
+        lines.append(f"  {title:<22}" + "".join(f"{cell:>24}" for cell in cells))
+
+    row("read by OCR (exact)", lambda outcomes: sum(o.in_text == "exact" for o in outcomes))
+    row("read by OCR (+near)", lambda outcomes: sum(o.in_text != "no" for o in outcomes))
+    row("detected (exact)", lambda outcomes: sum(o.how == "exact" for o in outcomes))
+    row("detected (+near)", lambda outcomes: sum(o.how in ("exact", "near") for o in outcomes))
+    row("detected (+partial)", lambda outcomes: sum(o.how != "missed" for o in outcomes))
+    kinds = sorted({o.label.type for outcomes in runs.values() for o in outcomes})
+    lines.append("")
+    lines.append("  detected (+partial), by type")
+    for kind in kinds:
+        cells = []
+        for name in names:
+            mine = [o for o in runs[name] if o.label.type == kind]
+            cells.append(f"{sum(o.how != 'missed' for o in mine):>4} of {len(mine):<4}"
+                         f"{_share(sum(o.how != 'missed' for o in mine), len(mine)):>8}    ")
+        lines.append(f"  {kind:<22}" + "".join(f"{cell:>24}" for cell in cells))
+    first, last = runs[names[0]], runs[names[-1]]
+    gained = sum(a.how == "missed" and b.how != "missed" for a, b in zip(first, last))
+    lost = sum(a.how != "missed" and b.how == "missed" for a, b in zip(first, last))
+    lines.append("")
+    lines.append(f"  labels found only with {names[-1]}: {gained}; found only with {names[0]}: {lost}")
+    return "\n".join(lines)
+
+
 def _pages(spec: str) -> set[int]:
     pages: set[int] = set()
     for part in spec.split(","):
@@ -280,38 +320,66 @@ def main(argv: list[str] | None = None) -> None:
                         help="other files to process alongside, so names found in them are searched for here")
     parser.add_argument("--out", default="outputs/eval")
     parser.add_argument("--no-ner", action="store_true", help="rules only: fast, but finds no names")
+    parser.add_argument("--location", help="score only labels with this location, e.g. image")
+    parser.add_argument("--compare-ocr", action="store_true",
+                        help="run twice: pictures read by Tesseract alone, then by Tesseract and docTR")
     args = parser.parse_args(argv)
 
     from .. import detect as detection
-    from ..extract import extract
+    from ..extract import extract, images
     from ..pipeline import look_again
 
     path = Path(args.document)
     kind = path.suffix.lstrip(".").lower()
     labels = [l for l in load(args.labels, args.sheet) if not l.file or l.file.lower() in (kind, path.name.lower())]
     pages = _pages(args.pages) if args.pages else {l.page for l in labels}
-    labels = [l for l in labels if l.page in pages]
-    print(f"{len(labels)} labels on {len(pages)} pages ({min(pages)} to {max(pages)})")
+    labels = [l for l in labels if l.page in pages and (not args.location or l.location == args.location.lower())]
+    print(f"{len(labels)} labels on {len(pages)} pages ({min(pages)} to {max(pages)})"
+          + (f", location {args.location}" if args.location else ""))
 
     def detect(docs):
         return detection.detect(docs, use_ner=not args.no_ner)
 
-    clock = time.perf_counter()
-    docs = [extract(p) for p in [path, *map(Path, args.others)]]
-    extracted = time.perf_counter()
-    print(f"extraction: {extracted - clock:.0f} s")
-    found = look_again(docs, detect(docs), detect)
-    print(f"detection:  {time.perf_counter() - extracted:.0f} s")
+    images.use_cache(Path(args.out) / "cache")
 
-    doc = docs[0]
-    mine = [f for f in found if f.doc_id == doc.doc_id and f.page in pages]
-    outcomes, unmatched = compare(labels, mine, page_texts(doc))
-    text = summary(outcomes, unmatched, len(mine))
+    def measure(folder: Path) -> list[Outcome]:
+        clock = time.perf_counter()
+        docs = [extract(p) for p in [path, *map(Path, args.others)]]
+        extracted = time.perf_counter()
+        print(f"extraction: {extracted - clock:.0f} s")
+        found = look_again(docs, detect(docs), detect)
+        print(f"detection:  {time.perf_counter() - extracted:.0f} s")
+
+        doc = docs[0]
+        mine = [f for f in found if f.doc_id == doc.doc_id and f.page in pages
+                and (not args.location or f.location == args.location.lower())]
+        outcomes, unmatched = compare(labels, mine, page_texts(doc))
+        text = summary(outcomes, unmatched, len(mine))
+        print(text)
+        print()
+        for written in write_report(folder, doc, outcomes, unmatched, text):
+            print("wrote", written)
+        print(f"total: {time.perf_counter() - clock:.0f} s")
+        return outcomes
+
+    if not args.compare_ocr:
+        measure(Path(args.out))
+        return
+    runs = {}
+    before = os.environ.get("CERBERUS_OCR")
+    try:
+        for name, setting in (("Tesseract alone", "tesseract"), ("Tesseract + docTR", "both")):
+            print(f"\n=== pictures read by: {name} ===")
+            os.environ["CERBERUS_OCR"] = setting
+            runs[name] = measure(Path(args.out) / setting)
+    finally:
+        os.environ.pop("CERBERUS_OCR", None) if before is None else os.environ.update(CERBERUS_OCR=before)
+    text = comparison(runs)
+    print("\n=== comparison ===")
     print(text)
-    print()
-    for written in write_report(args.out, doc, outcomes, unmatched, text):
-        print("wrote", written)
-    print(f"total: {time.perf_counter() - clock:.0f} s")
+    target = Path(args.out) / "ocr_comparison.txt"
+    target.write_text(text + "\n", encoding="utf-8")
+    print("\nwrote", target)
 
 
 if __name__ == "__main__":

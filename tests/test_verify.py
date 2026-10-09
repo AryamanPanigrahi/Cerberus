@@ -146,7 +146,7 @@ def test_pipeline_withholds_everything_when_an_output_is_not_clean(tmp_path, mon
     source.mkdir()
     paths = [word_file(source), deck_file(source)]
 
-    def broken(path, doc, tokenized, out):  # a masker that masks nothing
+    def broken(path, doc, tokenized, out, pictures="findings"):  # a masker that masks nothing
         out.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(path, out)
         return out

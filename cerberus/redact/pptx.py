@@ -2,8 +2,11 @@
 
 - Text: each finding is replaced by its token inside the run that holds it,
   so fonts, colours and positions are untouched.
-- Pictures: replaced by a grey placeholder of the same shape. The original
-  image is no longer referenced, so it is not written to the new file.
+- Pictures: a picture two OCR engines read and agreed on is rebuilt from its
+  pixels with the PII, the words they disagreed on, faces and barcodes
+  painted over. Any other picture is replaced by a grey placeholder of the
+  same shape. Either way the original image is no longer referenced, so it
+  is not written to the new file.
 - File properties: a property naming a person holds that person's token, or
   nothing if no name was detected in it.
 - Picture alt text is cleared and speaker notes are tokenised like slide text.
@@ -28,15 +31,14 @@ from . import office
 from .tokens import Tokenized
 
 
-def mask_pptx(source: str | Path, doc: Document, tokenized: list[Tokenized], out: str | Path) -> Path:
+def mask_pptx(
+    source: str | Path, doc: Document, tokenized: list[Tokenized], out: str | Path, pictures: str = "findings"
+) -> Path:
     """Write a masked copy of `source` to `out`. `doc` is the extraction of the same file."""
     spans = office.spans_by_block(doc, tokenized)
     prs = pptx.Presentation(str(source))
     slides = list(prs.slides)
-    sizes = {
-        (b.native_ref or {}).get("sha1"): tuple((b.native_ref or {}).get("pixels") or ()) or None
-        for b in doc.blocks if b.type is BlockType.IMAGE_REGION
-    }
+    sizes = office.pictures_by_key(doc, office.picture_boxes(doc, tokenized, pictures), lambda ref: ref.get("sha1"))
 
     for block in doc.blocks:
         found = spans.get(block.block_id)
@@ -128,14 +130,16 @@ def _rewrite(frame, expected: str, spans, where: str) -> None:
 
 
 def _mask_picture(shape: Picture, sizes: dict) -> str | None:
-    """Point the picture at a placeholder. Returns the relationship id it used before."""
+    """Point the picture at its masked copy. Returns the relationship id it used before."""
     blip = shape._element.blipFill.blip
     try:
         key = shape.image.sha1
     except ValueError:  # linked, not embedded: nothing in the file to replace
         return None
     old = blip.rEmbed
-    _, rid = shape.part.get_or_add_image_part(io.BytesIO(office.placeholder(sizes.get(key))))
+    boxes, size = sizes.get(key, (None, None))  # a picture extraction did not see is masked whole
+    masked = office.covered_picture(shape.image.blob, shape.image.content_type, boxes, size)
+    _, rid = shape.part.get_or_add_image_part(io.BytesIO(masked))
     blip.rEmbed = rid
     for extra in blip.findall(qn("a:extLst")):
         blip.remove(extra)  # an SVG twin of the picture would be referenced from here

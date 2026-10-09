@@ -8,8 +8,10 @@ The token is then written in the cleared space.
 What is masked:
 
 - every finding, at the boxes of the words it covers;
-- every figure, as a whole region (text inside pictures is too noisy to trust
-  word-by-word masking);
+- inside a figure that two OCR engines read and agreed on: every finding, every
+  word the engines disagreed on, and any face or barcode. No token is written
+  inside a picture: a label there would be read back as text by the next OCR;
+- every other figure, as a whole region;
 - every quarantined page, entirely.
 
 The file's own properties are removed too. A PDF keeps them twice (the info
@@ -25,25 +27,34 @@ from pathlib import Path
 import pymupdf
 
 from ..extract.ir import BlockType, Document, Unit
+from . import office
 from .tokens import Tokenized
 
 _FILL = (0.88, 0.88, 0.88)  # light grey, so a masked area is visible as such
 _PAD = 1.0  # points added round each box, to cover the soft edges of scanned letters
 
 
-def mask_pdf(source: str | Path, doc: Document, tokenized: list[Tokenized], out: str | Path) -> Path:
+def mask_pdf(
+    source: str | Path, doc: Document, tokenized: list[Tokenized], out: str | Path, pictures: str = "findings"
+) -> Path:
     """Write a masked copy of `source` to `out`. `doc` is the extraction of the same file."""
     blocks = {b.block_id: b for b in doc.blocks}
     figures = [b for b in doc.blocks if b.type is BlockType.IMAGE_REGION and b.bbox is not None]
     quarantined = {p.number for p in doc.pages if p.quarantined}
+    inside = office.picture_boxes(doc, tokenized, pictures)  # figure -> rectangles, or None for the whole figure
 
     marks: dict[int, list[tuple[pymupdf.Rect, str]]] = {}
     with pymupdf.open(str(source)) as pdf:
         for number in quarantined:
             marks.setdefault(number, []).append((pdf[number - 1].rect, "[page masked]"))
         for figure in figures:
-            if figure.page not in quarantined:
+            if figure.page in quarantined:
+                continue
+            boxes = inside.get(figure.block_id)
+            if boxes is None:
                 marks.setdefault(figure.page, []).append((_rect(figure.bbox), "[figure masked]"))
+            else:
+                marks.setdefault(figure.page, []).extend((pymupdf.Rect(*box), "") for box in boxes)
 
         for item in tokenized:
             f = item.finding
@@ -51,7 +62,7 @@ def mask_pdf(source: str | Path, doc: Document, tokenized: list[Tokenized], out:
             if f.doc_id != doc.doc_id or block is None or block.page is None or block.page in quarantined:
                 continue
             if f.location == "image":
-                continue  # inside a figure, which is masked whole
+                continue  # inside a figure: handled with the figure, above
             boxes = [_rect(b) for b in block.span_boxes(f.start, f.end) if b.unit is Unit.PT]
             if not boxes and block.bbox is not None:
                 # A typed page has no word boxes: ask the PDF where the text is.
