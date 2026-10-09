@@ -171,10 +171,10 @@ def test_a_trusted_picture_is_covered_at_findings_and_pii_shapes_and_nothing_els
     doc, region, found = picture_document()
     tokenized, _ = tokens.assign(merge.one_per_place([doc], found))
     boxes = office.picture_boxes(doc, tokenized)[region.block_id]
-    # The finding, and the wider reading that was dropped as its duplicate.
-    assert {(62, 40, 120, 52), (124, 40, 150, 52), (44, 40, 150, 52)} <= set(boxes)
+    # One rectangle over the finding and the wider reading dropped as its duplicate, with a margin.
+    assert any(x0 < 44 and x1 > 150 and y0 < 40 and y1 > 52 for x0, y0, x1, y1 in boxes)
     # A word the engines merely read differently is not covered, nor is anything else.
-    assert all(40 <= box[1] and box[3] <= 52 for box in boxes)
+    assert all(35 <= box[1] and box[3] <= 57 for box in boxes)
     assert office.picture_boxes(doc, tokenized, pictures="whole") == {region.block_id: None}
 
 
@@ -217,10 +217,78 @@ def test_a_word_the_engines_disagree_on_is_covered_unless_one_read_an_ordinary_w
 
     line("paymert zqxwv REF-0042 vkjqz", "tesseract", (0, 100, 200, 300))
     line("payment zqxvw REF-0043 approved", "doctr", (0, 100, 200, 300))
-    covered = sorted({b[0] for b in office.picture_boxes(doc, [])[region.block_id]})
+    covered = office.picture_boxes(doc, [])[region.block_id]
     # Only the place where both readings are nonsense. A misread ordinary word, a short
     # code and a place where one engine read an ordinary word are all left visible.
-    assert covered == [100]
+    assert len(covered) == 1 and covered[0][0] < 100 < 160 < covered[0][2]
+
+
+def form_row(cells, common_text="the payment was reviewed and found effective"):
+    """One row of a form inside a trusted picture, as one OCR line. cells: (text, x) per word."""
+    doc = Document("d0c", "form.pdf", "pdf")
+    doc.add(BlockType.PARAGRAPH, common_text)
+    region = doc.add(BlockType.IMAGE_REGION, container=Container.IMAGE, page=1, native_ref={"trusted": True, "cover": []})
+
+    def line(words, engine="doctr", y=10):
+        text, placed, at = "", [], 0
+        for piece, x in words:
+            placed.append(Word(at, at + len(piece), BBox(x, y, x + 7 * len(piece), y + 12, Unit.PT), 0.9))
+            text += piece + " "
+            at += len(piece) + 1
+        return doc.add(BlockType.PARAGRAPH, text.strip(), container=Container.IMAGE, source=Source.OCR, page=1,
+                       parent_id=region.block_id, words=placed, native_ref={"engine": engine})
+
+    return doc, region, line
+
+
+def hidden(boxes, x0, x1, y=16):
+    """Is everything from x0 to x1 on the line at y under one of the rectangles?"""
+    return any(b[0] <= x0 and b[2] >= x1 and b[1] <= y <= b[3] for b in boxes)
+
+
+def test_initials_split_from_their_surname_are_covered_with_it():
+    # "J. Q. Sample" in a table cell, as OCR really returns it: initials glued together and
+    # put on a line of their own, the surname on the next line beside a number.
+    doc, region, line = form_row(None)
+    line([("REF-0042", 0), ("Payment", 100), ("effective", 160), ("JQ.", 300)], y=10)
+    line([("Sample", 325), ("Mobile", 420), ("555-010-0101", 470)], y=12)
+    boxes = office.picture_boxes(doc, [])[region.block_id]
+    assert hidden(boxes, 300, 325 + 42), "initials and surname must both be under a mask"
+    assert hidden(boxes, 420, 470 + 84)  # the label and its number are one field: all of it
+    assert not hidden(boxes, 0, 56) and not hidden(boxes, 100, 149)  # the code and the description stay
+
+
+def test_a_cell_is_covered_whole_and_a_sentence_only_at_the_name():
+    doc, region, line = form_row(None)
+    line([("J.", 300), ("Q.", 316), ("Sample", 332)], y=10)  # the usual reading: one cell
+    sentence = [("the", 0), ("payment", 28), ("was", 84), ("reviewed", 112), ("and", 175), ("found", 203),
+                ("effective", 245), ("J.", 315), ("Sample", 336), ("reviewed", 385)]
+    line(sentence, y=60)
+    boxes = office.picture_boxes(doc, [])[region.block_id]
+    assert hidden(boxes, 300, 332 + 42, y=16)
+    assert hidden(boxes, 315, 336 + 42, y=66)  # initial and surname as one rectangle
+    assert not hidden(boxes, 245, 300, y=66) and not hidden(boxes, 385, 440, y=66)  # the words either side are left
+    assert all(b[2] - b[0] < 200 for b in boxes)
+
+
+def test_a_capitalised_word_the_document_never_writes_small_is_treated_as_a_surname():
+    doc, region, line = form_row(None)
+    line([("Payment", 0), ("Zorblenk", 200), ("Effective", 400)], y=10)
+    boxes = office.picture_boxes(doc, [])[region.block_id]
+    assert hidden(boxes, 200, 256) and not hidden(boxes, 0, 49) and not hidden(boxes, 400, 463)
+
+
+def test_scraps_left_beside_a_mask_are_counted():
+    def read(text, x, confidence=0.9):
+        return (text, BBox(x, 10, x + 7 * len(text), 22, Unit.PT), confidence)
+
+    mask = [(100, 8, 180, 24)]
+    assert office.residue([read("J.", 84)], mask) == 1  # initials standing next to the mask
+    assert office.residue([read("Sam", 170)], mask) == 1  # a word the mask cuts through
+    assert office.residue([read("approved", 190), read("the", 60), read("OK", 84)], mask) == 0  # ordinary neighbours
+    assert office.residue([read("J.", 84, confidence=0.2)], mask) == 0  # the OCR was guessing
+    assert office.residue([read("xx", 120)], mask) == 0  # read under the grey: not text
+    assert office.residue([read("J.", 400)], mask) == 0  # initials nowhere near a mask
 
 
 @pytest.mark.parametrize("change", [{"trusted": False}, {"quarantined": True}])
@@ -261,6 +329,8 @@ def test_a_trusted_picture_in_a_deck_keeps_its_content_and_loses_the_finding(tmp
     prs = Presentation()
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     slide.shapes.add_picture(io.BytesIO(card()), Emu(500_000), Emu(500_000))
+    note = slide.shapes.add_textbox(Emu(500_000), Emu(4_000_000), Emu(6_000_000), Emu(500_000))
+    note.text_frame.text = "The user record and the badge are shown above."  # makes "user" and "record" ordinary words
     path = tmp_path / "deck.pptx"
     prs.save(str(path))
 
@@ -274,7 +344,7 @@ def test_a_trusted_picture_in_a_deck_keeps_its_content_and_loses_the_finding(tmp
     assert [t.finding.entity for t in tokenized] == ["STAFF_ID"]
 
     out = mask_pptx(path, doc, tokenized, tmp_path / "masked.pptx")
-    (shape,) = Presentation(str(out)).slides[0].shapes
+    shape = next(s for s in Presentation(str(out)).slides[0].shapes if hasattr(s, "image"))
     masked = Image.open(io.BytesIO(shape.image.blob)).convert("L")
     assert masked.size == (640, 200)
     box = doc.get(tokenized[0].finding.block_id).span_boxes(tokenized[0].finding.start, tokenized[0].finding.end)[0]
@@ -324,3 +394,28 @@ def test_two_engines_read_a_clear_picture_and_agree():
     assert reading.second is not None and reading.trusted and reading.agreement > 0.8
     text = " ".join(w.text for line in reading.second for w in line.words)
     assert "EMP-00002" in text and "Badge" in text
+
+
+def test_a_scrap_beside_a_mask_sends_the_picture_back_to_whole():
+    doc, region, _ = picture_document()
+    scrap = verify.Problem("card.pdf", "residue", "page 1, image", "scrap beside a mask", 1, True)
+    assert pipeline.distrust_pictures(doc, [scrap])
+    assert region.native_ref["trusted"] is False and region.native_ref["fallback"] == "a scrap of text left beside a mask"
+
+
+def test_verification_finds_initials_left_beside_a_mask_in_a_masked_pdf_page():
+    original = Document("d0c", "form.pdf", "pdf")
+    region = original.add(BlockType.IMAGE_REGION, container=Container.IMAGE, page=1, native_ref={"trusted": True})
+    again = Document("d0c2", "form.pdf", "pdf")
+    again.add(BlockType.IMAGE_REGION, container=Container.IMAGE, page=1)
+
+    def read(text, x):
+        again.add(BlockType.PARAGRAPH, text, container=Container.IMAGE, page=1, source=Source.OCR,
+                  words=[Word(0, len(text), BBox(x, 10, x + 7 * len(text), 22, Unit.PT), 0.9)])
+
+    read("approved", 190)
+    masks = {region.block_id: [(100, 8, 180, 24)]}
+    assert verify._scraps("form.pdf", again, original, masks) == []
+    read("J.", 84)
+    (problem,) = verify._scraps("form.pdf", again, original, masks)
+    assert (problem.check, problem.page, problem.in_picture) == ("residue", 1, True)

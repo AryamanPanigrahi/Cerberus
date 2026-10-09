@@ -22,7 +22,7 @@ def samples(tmp_path_factory):
 def test_three_sample_files_are_written_one_per_format(samples):
     assert sorted(samples) == ["incident_scan.pdf", "staff_notice.docx", "team.pptx"]
     with pymupdf.open(str(samples["incident_scan.pdf"])) as pdf:
-        assert len(pdf) == 1 and pdf[0].get_text().strip() == ""  # a scan: no text layer
+        assert len(pdf) == 3 and all(page.get_text().strip() == "" for page in pdf)  # scans: no text layer
         assert pdf.metadata["author"] == synthetic.AUTHOR
 
 
@@ -71,6 +71,31 @@ def test_a_greyscale_scan_is_still_the_same_page_after_masking(samples, tmp_path
     assert differing < 0.01 * before.width * before.height
     with pymupdf.open(str(out)) as pdf:
         assert not (pdf.metadata or {}).get("author")
+
+
+def test_uploaded_files_replace_what_was_in_the_folder(tmp_path):
+    (tmp_path / "old.pdf").write_bytes(b"%PDF-1.4 old")
+    uploaded = (
+        {"name": "new.docx", "content": memoryview(b"new document")},
+        {"name": "notes.txt", "content": memoryview(b"not a supported type")},
+    )
+    assert [p.name for p in demo.save_uploads(uploaded, tmp_path)] == ["new.docx"]
+    assert [p.name for p in demo.files_in(tmp_path)] == ["new.docx"]
+    # Nothing usable uploaded: the folder is left as it was.
+    assert demo.save_uploads(({"name": "notes.txt", "content": b"x"},), tmp_path) == []
+    assert [p.name for p in demo.files_in(tmp_path)] == ["new.docx"]
+
+
+def test_fast_mode_switches_the_second_engine_off_only_for_the_run(tmp_path, monkeypatch):
+    import os
+
+    seen = {}
+    monkeypatch.setattr(demo.pipeline, "run", lambda paths, out, pictures: seen.update(mode=os.environ.get("CERBERUS_OCR")))
+    monkeypatch.setenv("CERBERUS_OCR", "both")
+    demo.run(tmp_path, tmp_path / "out", fast=True)
+    assert seen["mode"] == "tesseract" and os.environ["CERBERUS_OCR"] == "both"
+    demo.run(tmp_path, tmp_path / "out")
+    assert seen["mode"] == "both"
 
 
 def test_a_picture_is_fetched_by_its_place_in_the_document(samples):

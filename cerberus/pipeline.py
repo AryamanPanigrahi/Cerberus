@@ -26,7 +26,7 @@ from .detect.merge import resolve_overlaps
 from .extract import extract
 from .extract import images
 from .extract.ir import BlockType, Document
-from .redact import tokens, verify
+from .redact import office, tokens, verify
 from .redact.docx import mask_docx
 from .redact.pdf import mask_pdf
 from .redact.pptx import mask_pptx
@@ -84,7 +84,7 @@ def run(
 
     def report(verified: bool) -> None:
         """Write the audit report, and check it like any other output: it must hold no value."""
-        result.reports = audit.write(out / "report", documents, tokenized, verified)
+        result.reports = audit.write(out / "report", documents, tokenized, verified, pictures)
         values = verify.known_values(tokenized)
         leaks = [
             verify.Problem(written.name, "raw", "report", token)
@@ -108,11 +108,14 @@ def run(
 
             mask = _MASKERS[path.suffix.lower()]
             masked = mask(path, doc, tokenized, pending / "masked" / path.name, pictures=pictures)
-            problems = verify.check_file(masked, tokenized, detect)
+            covered = office.picture_boxes(doc, tokenized, pictures)
+            problems = verify.check_file(masked, tokenized, detect, doc, covered)
             if problems and distrust_pictures(doc, problems):
-                # Something was still read in a picture masked word by word: mask it whole and check again.
+                # Something was still read in a picture masked word by word, or a scrap was left
+                # beside a mask: mask that picture whole and check again.
                 masked = mask(path, doc, tokenized, pending / "masked" / path.name, pictures=pictures)
-                problems = verify.check_file(masked, tokenized, detect)
+                covered = office.picture_boxes(doc, tokenized, pictures)
+                problems = verify.check_file(masked, tokenized, detect, doc, covered)
             result.problems += problems
     except Exception:
         withhold()  # a writer refused, or something broke: half-finished outputs are not left lying about
@@ -165,7 +168,7 @@ def distrust_pictures(doc: Document, problems: list[verify.Problem]) -> bool:
     masking does not change; if the count differs, every picture in the file.
     Returns whether anything changed, so the caller knows to write the file again.
     """
-    failed = [p for p in problems if p.check == "rescan" and p.in_picture]
+    failed = [p for p in problems if p.check in ("rescan", "residue") and p.in_picture]
     if not failed:
         return False
     regions = [b for b in doc.blocks if b.type is BlockType.IMAGE_REGION]
@@ -176,11 +179,14 @@ def distrust_pictures(doc: Document, problems: list[verify.Problem]) -> bool:
         chosen = [regions[p.picture[0]] for p in failed]
     else:
         chosen = regions
+    scraps = {(p.page, p.picture) for p in failed if p.check == "residue"}
     changed = False
     for block in chosen:
         ref = block.native_ref or {}
         if ref.get("trusted"):
-            block.native_ref = {**ref, "trusted": False, "fallback": "PII still readable after word-level masking"}
+            only_scraps = all(p.check == "residue" for p in failed if p.page == block.page) and scraps
+            reason = "a scrap of text left beside a mask" if only_scraps else "PII still readable after word-level masking"
+            block.native_ref = {**ref, "trusted": False, "fallback": reason}
             changed = True
     return changed
 

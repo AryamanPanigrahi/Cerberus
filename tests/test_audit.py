@@ -62,7 +62,7 @@ def test_file_summary_counts_by_category_location_and_page():
     docs, tokenized = sample()
     text = audit.summary(docs[0], tokenized)
     assert "| Pages read by OCR | 2 (1-2) |" in text
-    assert "| Pictures masked whole (not read reliably) | 1 |" in text
+    assert "| Pictures masked whole and queued for human review | 1 |" in text
     assert "| PERSON | 2 | 2 | 0 | 0 | 1 | 1 |" in text
     assert "| **All** | 3 | 3 | 0 | 0 | 2 | 1 |" in text
     assert "| 1 | 2 | 0 | 0 | 2 | 0 |" in text and "| 2 | 1 | 0 | 0 | 0 | 1 |" in text
@@ -93,6 +93,42 @@ def test_a_value_in_a_heading_is_shown_as_its_token():
 def test_files_are_written(tmp_path):
     docs, tokenized = sample()
     written = audit.write(tmp_path / "report", docs, tokenized, verified=True)
-    assert [p.name for p in written] == ["audit.csv", "policy.summary.md", "people.summary.md", "exposure.md"]
+    assert [p.name for p in written] == [
+        "audit.csv", "policy.summary.md", "people.summary.md", "exposure.md", "review_queue.csv",
+    ]
     with open(written[0], encoding="utf-8-sig", newline="") as handle:
         assert len(list(csv.DictReader(handle))) == 4
+
+
+def test_every_picture_masked_whole_is_queued_for_review_with_its_reason(tmp_path):
+    doc = Document("d0c", "manual.docx", "docx")
+
+    def picture(**ref):
+        return doc.add(BlockType.IMAGE_REGION, container=Container.IMAGE, native_ref=ref,
+                       quarantined=ref.pop("quarantined", False))
+
+    shown = picture(engines=["tesseract", "doctr"], trusted=True, agreement=0.9)
+    picture(engines=["tesseract", "doctr"], trusted=False, agreement=0.31, quarantined=True)
+    picture(engines=["tesseract"], trusted=False)
+    picture(engines=["tesseract", "doctr"], trusted=False, agreement=0.8, fallback="a scrap of text left beside a mask")
+    picture(unreadable="could not open picture: broken")
+    line = doc.add(BlockType.PARAGRAPH, "Jane Sample", container=Container.IMAGE, parent_id=doc.blocks[1].block_id)
+    found = [make(doc, line, 0, 11, entity="PERSON", detector="ner", rule="model", confidence=0.4, location="image")]
+    tokenized, _ = tokens.assign(found)
+
+    queue = audit.review_queue([doc], tokenized)
+    assert [(row["picture"], row["reason"], row["pii_found_inside"]) for row in queue] == [
+        (2, "the two OCR engines agree on only 31% of its text", 1),
+        (3, "read by one OCR engine only", 0),
+        (4, "a scrap of text left beside a mask", 0),
+        (5, "could not be opened or converted", 0),
+    ]
+    assert audit.why_whole(shown) is None
+    # With every picture masked whole on request, every picture is in the queue.
+    assert len(audit.review_queue([doc], tokenized, pictures="whole")) == 5
+
+    text = audit.exposure([doc], tokenized)
+    assert "4 of 5 pictures were masked whole" in text and "| the two OCR engines agree on only too little of its text | 1 |" in text
+    audit.write(tmp_path, [doc], tokenized)
+    with open(tmp_path / "review_queue.csv", encoding="utf-8-sig", newline="") as handle:
+        assert [row["picture"] for row in csv.DictReader(handle)] == ["2", "3", "4", "5"]

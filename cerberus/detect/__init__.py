@@ -38,4 +38,6 @@ def detect(docs: list[Document], use_ner: bool = True, review: str | Path | None
         findings += people
         # Names with independent evidence are now searched for everywhere.
         findings += dictionary.detect(docs, findings, keep, drop)
-    return one_per_place(docs, resolve_overlaps(findings))
+    from .allowlist import without_furniture_names
+
+    return one_per_place(docs, without_furniture_names(docs, resolve_overlaps(findings)))

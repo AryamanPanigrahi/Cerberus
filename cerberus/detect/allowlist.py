@@ -117,7 +117,9 @@ _WRITTEN_DATE = re.compile(
 _INITIALS = re.compile(r"\b(?:[A-Z]\.[^\S\n]?){1,3}[A-Z][A-Za-z'’-]{2,}")  # "J. Q. Sample", also "J.Q.Sample"
 
 
-def shaped_like_pii(text: str, common: frozenset[str] = frozenset()) -> list[tuple[int, int]]:
+def shaped_like_pii(
+    text: str, common: frozenset[str] = frozenset(), initials_only: bool = False
+) -> list[tuple[int, int]]:
     """Spans that have the shape of personal data, whether or not a detector reported them.
 
     Used only inside pictures, where the cost of a miss is a value left
@@ -133,6 +135,11 @@ def shaped_like_pii(text: str, common: frozenset[str] = frozenset()) -> list[tup
     label ("Customer Complaint"), not a name, and ordinary words at either
     end of a run are not part of the name ("High Jane Sample" in a table row).
 
+    initials_only looks for one shape, initials followed by a surname. A whole
+    line read across a table is searched for that alone: digits or capitalised
+    words from neighbouring cells must not be joined into a phone number or a
+    name, but initials and their surname may sit far apart.
+
     Deliberately not a shape: a short code such as a risk or ticket reference
     (three letters and four digits), or a year. Covering those hid most of a
     form to protect nothing.
@@ -141,11 +148,13 @@ def shaped_like_pii(text: str, common: frozenset[str] = frozenset()) -> list[tup
         letters = re.sub(r"[^A-Za-z]", "", word).lower()
         return len(letters) > 1 and letters in common
 
-    spans = [match.span() for match in _CODE.finditer(text)]
-    spans += [m.span() for m in _NUMBER_RUN.finditer(text) if sum(c.isdigit() for c in m.group()) >= _RUN_DIGITS]
-    spans += [match.span() for match in _WRITTEN_DATE.finditer(text)]
+    spans = []
+    if not initials_only:
+        spans += [match.span() for match in _CODE.finditer(text)]
+        spans += [m.span() for m in _NUMBER_RUN.finditer(text) if sum(c.isdigit() for c in m.group()) >= _RUN_DIGITS]
+        spans += [match.span() for match in _WRITTEN_DATE.finditer(text)]
     spans += [m.span() for m in _INITIALS.finditer(text) if not ordinary(re.split(r"\.", m.group())[-1])]
-    for match in _NAME_RUN.finditer(text):
+    for match in () if initials_only else _NAME_RUN.finditer(text):
         words = list(re.finditer(r"\S+", match.group()))
         if all(ordinary(w.group()) for w in words):
             continue
@@ -164,3 +173,33 @@ def shaped_like_pii(text: str, common: frozenset[str] = frozenset()) -> list[tup
                 spans.append((match.start() + start, match.start() + end))
                 break
     return sorted(spans)
+
+
+def without_furniture_names(docs, findings):
+    """Drop a name that a model read into a running header or footer and that is a name nowhere else.
+
+    A header or footer is the same line on every page: a document title, a
+    company name, "uncontrolled when printed". A model reading that line
+    thirty times, each with slightly different OCR noise, will sooner or later
+    take a scrap of it for a person. Nothing real is lost by ignoring that,
+    with one exception that is kept: a name that is a known identity, one
+    also found in the document's own text, is still masked wherever it
+    appears ("Prepared by Jane Sample" in a footer).
+
+    Only names are treated this way. An e-mail address or a number in a footer
+    is recognised by its form, which repetition does not make less true.
+    """
+    from ..extract.ir import BlockType
+
+    furniture = set()
+    for doc in docs:
+        furniture.update((doc.doc_id, b.block_id) for b in doc.blocks if b.type in (BlockType.HEADER, BlockType.FOOTER))
+
+    def key(finding) -> str:
+        return " ".join(finding.text.lower().split())
+
+    known = {key(f) for f in findings if f.entity == "PERSON" and (f.doc_id, f.block_id) not in furniture}
+    return [
+        f for f in findings
+        if not (f.entity == "PERSON" and (f.doc_id, f.block_id) in furniture and key(f) not in known)
+    ]

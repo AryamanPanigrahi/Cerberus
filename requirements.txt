@@ -3,6 +3,9 @@ python-docx
 pymupdf
 pytesseract
 numpy
+# Used directly: pictures, and the XML inside DOCX and PPTX files
+Pillow
+lxml
 # Name and address detection. Install the CPU build of torch first, or pip
 # pulls a much larger GPU build:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -18,4 +21,5 @@ openpyxl
 python-doctr
 # Faces and barcodes inside pictures. OpenCV comes with python-doctr; the face
 # model (face_detection_yunet_2023mar.onnx, from the OpenCV model zoo) goes in models/opencv.
+opencv-python
 pyzbar

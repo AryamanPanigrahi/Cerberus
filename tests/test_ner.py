@@ -154,3 +154,21 @@ def test_a_span_reaching_across_a_line_break_is_two_names():
     doc = Document("d0c", "sample.docx", "docx")
     doc.add(BlockType.PARAGRAPH, "Jane Sample\nOmar Placeholder")
     assert [f.text for f in ner.detect([doc], merged, "fake")] == ["Jane Sample", "Omar Placeholder"]
+
+
+def test_a_name_read_only_into_a_running_footer_is_dropped_unless_it_is_a_known_person():
+    from cerberus.detect.finding import make
+
+    doc = Document("d0c", "scan.pdf", "pdf")
+    body = doc.add(BlockType.PARAGRAPH, "Prepared by Jane Sample.", page=1)
+    footers = [doc.add(BlockType.FOOTER, "Sample Corp Inc. - Prepared by Jane Sample", page=n) for n in (1, 2, 3)]
+
+    def person(block, start, end):
+        return make(doc, block, start, end, entity="PERSON", detector="ner", rule="fake", confidence=0.3, location="body")
+
+    noise = person(footers[0], 7, 16)  # "Corp Inc.", taken for a name on one page
+    real_in_footer = person(footers[1], 31, 42)
+    in_body = person(body, 12, 23)
+    mail = make(doc, footers[2], 0, 6, entity="EMAIL", detector="rules", rule="fake", confidence=0.9, location="body")
+    kept = allowlist.without_furniture_names([doc], [noise, real_in_footer, in_body, mail])
+    assert kept == [real_in_footer, in_body, mail]

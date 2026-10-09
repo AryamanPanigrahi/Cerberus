@@ -48,11 +48,52 @@ def files_in(folder: str | Path) -> list[Path]:
     return sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in SUPPORTED)
 
 
-def run(folder: str | Path, out: str | Path, pictures: str = "findings") -> tuple[pipeline.Result, float]:
-    """Run the whole pipeline on every supported file in folder. Returns the result and the seconds taken."""
+def run(
+    folder: str | Path, out: str | Path, pictures: str = "findings", fast: bool = False
+) -> tuple[pipeline.Result, float]:
+    """Run the whole pipeline on every supported file in folder. Returns the result and the seconds taken.
+
+    fast=True reads pictures with one OCR engine, not two. That is several
+    times quicker on a file with many pictures, and it changes one thing:
+    every picture is masked whole and queued for review, because masking a
+    picture word by word needs two engines to agree on it. Text, tables and
+    the redacted text for the LLM are the same in both modes.
+    """
+    import os
+
+    before = os.environ.get("CERBERUS_OCR")
+    if fast:
+        os.environ["CERBERUS_OCR"] = "tesseract"
     started = time.perf_counter()
-    result = pipeline.run(files_in(folder), out, pictures=pictures)
+    try:
+        result = pipeline.run(files_in(folder), out, pictures=pictures)
+    finally:
+        if fast:
+            os.environ.pop("CERBERUS_OCR", None) if before is None else os.environ.update(CERBERUS_OCR=before)
     return result, time.perf_counter() - started
+
+
+def save_uploads(uploaded, folder: str | Path) -> list[Path]:
+    """Write the files chosen in a notebook upload button into folder; other file types are left out.
+
+    uploaded is the `.value` of an ipywidgets FileUpload: a sequence of
+    entries with a name and the file's bytes (older versions: a dict by name).
+    The folder is emptied of earlier documents first, so a run processes
+    exactly what was just uploaded.
+    """
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    entries = uploaded.values() if isinstance(uploaded, dict) else uploaded
+    chosen = [(Path(entry["name"]).name, bytes(entry["content"])) for entry in entries]
+    chosen = [(name, data) for name, data in chosen if Path(name).suffix.lower() in SUPPORTED]
+    if chosen:
+        for old in files_in(folder):
+            old.unlink()
+    written = []
+    for name, data in chosen:
+        (folder / name).write_bytes(data)
+        written.append(folder / name)
+    return written
 
 
 def _table(headings: list[str], rows: list[list], numeric: frozenset[int] = frozenset()) -> str:
@@ -132,7 +173,7 @@ def text_views(doc: Document, tokenized: list[Tokenized], limit: int = 12) -> st
 
 def saved_report(out: str | Path, name: str = "exposure.md") -> str:
     """One of the report files of a finished run, as Markdown text (tokens and counts, no values)."""
-    return (Path(out) / "report" / name).read_text(encoding="utf-8")
+    return (Path(out) / "report" / name).read_text(encoding="utf-8-sig")
 
 
 def saved_counts(out: str | Path) -> str:

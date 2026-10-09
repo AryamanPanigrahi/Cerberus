@@ -134,7 +134,7 @@ def test_pipeline_releases_verified_outputs_for_all_three_formats(tmp_path):
         assert "duty.manager" not in masked[0].get_text() and not (masked.metadata or {}).get("author")
     assert (tmp_path / "out" / "vault.json").exists()
     assert [p.name for p in result.reports] == [
-        "audit.csv", "contacts.summary.md", "deck.summary.md", "policy.summary.md", "exposure.md",
+        "audit.csv", "contacts.summary.md", "deck.summary.md", "policy.summary.md", "exposure.md", "review_queue.csv",
     ]
     report = "".join(p.read_text(encoding="utf-8-sig") for p in result.reports)
     assert "**passed**" in report and "<EMAIL_" in report

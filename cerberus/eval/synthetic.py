@@ -2,7 +2,7 @@
 
 Every name, number and address here is invented. The files are safe to
 commit, to show on a slide and to run in front of an audience, and they are
-small enough that the whole pipeline runs on them in about a minute.
+small enough that the whole pipeline runs on them in a minute or two.
 
 What each one exercises:
 
@@ -10,10 +10,12 @@ What each one exercises:
                         in running prose, a picture of an access card (name,
                         number, address and a barcode as pixels only), an
                         author in the file properties
-    incident_scan.pdf   a scanned page: no text layer, so everything is OCR;
-                        identifiers in unlabelled prose, a card number, a
-                        tax number, a test-range social security number, an
-                        author stored in the PDF's properties
+    incident_scan.pdf   three scanned pages: no text layer, so everything is
+                        OCR. Page 1: identifiers in unlabelled prose, a card
+                        number, a tax number, a test-range social security
+                        number. Page 2: a ruled table of people. Page 3: a
+                        framed figure holding the access card. An author is
+                        stored in the PDF's properties
     team.pptx           separate text boxes read in the wrong order by a naive
                         reader, and a table that uses abbreviated names
 
@@ -102,12 +104,30 @@ def _docx(path: Path) -> Path:
 
 
 def _scanned_pdf(path: Path) -> Path:
-    """One page that is a single image, as a scanner would produce it."""
+    """Three pages, each a single image, as a scanner would produce them.
+
+    Page 1 is prose with no field labels, page 2 a ruled table of people,
+    page 3 a framed figure: the access card, whose text is twice removed from
+    the file (a picture inside a picture of a page).
+    """
     import pymupdf
     from PIL import Image, ImageDraw
 
+    size = (1654, 2339)  # A4 at 200 dpi
+
+    def sheet() -> tuple:
+        page = Image.new("L", size, 255)
+        return page, ImageDraw.Draw(page)
+
+    def write(draw, lines, top=220) -> int:
+        for text, height in lines:
+            draw.text((180, top), text, fill=0, font=_font(height))
+            top += int(height * 1.9)
+        return top
+
     name, number, _, phone = PEOPLE[2]
-    lines = [
+    first, draw = sheet()
+    write(draw, [
         ("4. Incident summary", 44),
         ("", 20),
         ("On the morning of the review the duty manager spoke to", 30),
@@ -118,19 +138,37 @@ def _scanned_pdf(path: Path) -> Path:
         (f"and a social security number of {SSN} on the form.", 30),
         ("", 20),
         ("No further action was taken by the service desk that day.", 30),
-    ]
-    page = Image.new("L", (1654, 2339), 255)  # A4 at 200 dpi
-    draw = ImageDraw.Draw(page)
-    top = 220
-    for text, size in lines:
-        draw.text((180, top), text, fill=0, font=_font(size))
-        top += int(size * 1.9)
-    scan = io.BytesIO()
-    page.save(scan, format="PNG")
+    ])
+
+    second, draw = sheet()
+    top = write(draw, [("5. Named contacts", 44), ("", 20), ("The people below may approve an exception.", 30), ("", 20)])
+    columns = (150, 500, 730, 1190, 1530)  # left edge of each column, then the right edge of the table
+    draw.rectangle((columns[0], top, columns[-1], top + 64), fill=40)  # the header band
+    for x, heading in zip(columns, ("APPROVER", "STAFF ID", "E-MAIL", "MOBILE")):
+        draw.text((x + 14, top + 18), heading, fill=255, font=_font(26))
+    top += 64
+    for person in PEOPLE:
+        for x, text in zip(columns, (person[0], person[1], person[2], person[3])):
+            draw.text((x + 14, top + 18), text, fill=0, font=_font(28))
+        top += 70
+        draw.line((columns[0], top, columns[-1], top), fill=150, width=2)
+    write(draw, [("Changes to this list are approved by the programme office.", 30)], top + 60)
+
+    third, draw = sheet()
+    top = write(draw, [("6. Access cards", 44), ("", 20), ("The card issued to staff is shown in Figure 1.", 30), ("", 20)])
+    card = Image.open(io.BytesIO(access_card())).convert("L")
+    frame = (180, top, 180 + card.width + 80, top + card.height + 80)
+    draw.rectangle(frame, outline=90, width=4)
+    third.paste(card, (frame[0] + 40, frame[1] + 40))
+    write(draw, [("Figure 1 - Sample access card.", 26), ("", 20),
+                 ("A lost card must be reported to the service desk the same day.", 30)], frame[3] + 30)
 
     pdf = pymupdf.open()
-    sheet = pdf.new_page(width=595, height=842)
-    sheet.insert_image(sheet.rect, stream=scan.getvalue())
+    for page in (first, second, third):
+        scan = io.BytesIO()
+        page.save(scan, format="PNG")
+        leaf = pdf.new_page(width=595, height=842)
+        leaf.insert_image(leaf.rect, stream=scan.getvalue())
     pdf.set_metadata({"author": AUTHOR, "title": "Incident summary"})
     pdf.save(str(path))
     pdf.close()

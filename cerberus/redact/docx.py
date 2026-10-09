@@ -225,9 +225,12 @@ def _mask_pictures(part, root, name: str, sizes: dict) -> None:
         old.add(rid)
     for described in root.iter(f"{{{_WP}}}docPr"):
         described.attrib.pop("descr", None)
-    # A relationship nothing points at any more is dropped, and its image with it.
+    # A relationship nothing points at any more is dropped, and its image with it. That is
+    # every unused image relationship, not only the ones replaced above: the SVG twin of a
+    # picture hangs off a relationship of its own, which removing the reference leaves behind.
     still_used = {v for e in root.iter() if isinstance(e.tag, str) for k, v in e.attrib.items() if k.startswith(f"{{{_R}}}")}
-    for rid in old - still_used:
+    unused_images = {rid for rid, rel in part.rels.items() if rel.reltype.endswith("/image") and not rel.is_external}
+    for rid in (old | unused_images) - still_used:
         part.rels.pop(rid, None)
 
 

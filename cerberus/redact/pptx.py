@@ -81,7 +81,9 @@ def mask_pptx(
     for part, old in replaced.items():
         used = {v for e in part._element.iter() if isinstance(e.tag, str)
                 for k, v in e.attrib.items() if k.startswith(relationship)}
-        for rid in old - used:
+        # Every unused image relationship goes, the SVG twin of a replaced picture included.
+        unused_images = {rid for rid, rel in part.rels.items() if rel.reltype.endswith("/image") and not rel.is_external}
+        for rid in (old | unused_images) - used:
             part.rels.pop(rid)
 
     properties = office.core_property_blocks(doc)

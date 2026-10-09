@@ -1,3 +1,4 @@
 nbstripout
 pytest
 notebook
+ipywidgets

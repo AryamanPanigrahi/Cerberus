@@ -6,6 +6,9 @@ who is not cleared to see the data, and tied back to a value only by someone
 holding the vault.
 
     audit.csv            one row per finding: the "transparent tags"
+    review_queue.csv     one row per picture masked whole, with the reason: the
+                         pictures a person has to look at, because the pipeline
+                         could not show them safely by itself
     <file>.summary.md    per file: pages read by OCR, what was withheld,
                          counts by category and by location, counts per page
     exposure.md          across files: totals, people seen in more than one
@@ -76,6 +79,55 @@ def _box(boxes: list) -> str:
     return f"({x0}, {y0})-({x1}, {y1}) {boxes[0].unit.value}"
 
 
+REVIEW_COLUMNS = ["file", "page", "picture", "reason", "engines", "agreement", "pii_found_inside", "box"]
+
+
+def why_whole(block, pictures: str = "findings") -> str | None:
+    """Why a picture is masked whole, or None if it is masked word by word."""
+    ref = block.native_ref or {}
+    if "unreadable" in ref:
+        return "could not be opened or converted"
+    if ref.get("fallback"):
+        return ref["fallback"]
+    if len(ref.get("engines", [])) < 2:
+        return "read by one OCR engine only"
+    if ref.get("trusted") and not block.quarantined:
+        return "every picture is masked whole in this mode" if pictures == "whole" else None
+    if ref.get("agreement") is not None:
+        return f"the two OCR engines agree on only {ref['agreement']:.0%} of its text"
+    return "read with low confidence"
+
+
+def review_queue(docs: list[Document], tokenized: list[Tokenized], pictures: str = "findings") -> list[dict]:
+    """The pictures a person must look at: every one masked whole, and why.
+
+    Masking a picture whole is the safe choice and also an admission: the
+    pipeline could not tell what was in it well enough to show it. The number
+    of rows here, out of all pictures, is how much of the picture channel
+    still needs human review.
+    """
+    inside = Counter()
+    by_id = {doc.doc_id: doc for doc in docs}
+    for item in tokenized:
+        f = item.finding
+        if f.location == "image" and f.doc_id in by_id:
+            inside[by_id[f.doc_id].get(f.block_id).parent_id] += 1
+    queue = []
+    for doc in docs:
+        regions = [b for b in doc.blocks if b.type is BlockType.IMAGE_REGION]
+        for number, block in enumerate(regions, start=1):
+            reason = why_whole(block, pictures)
+            if reason is None:
+                continue
+            ref = block.native_ref or {}
+            queue.append({
+                "file": doc.name, "page": block.page or "", "picture": number, "reason": reason,
+                "engines": "+".join(ref.get("engines", [])), "agreement": "" if ref.get("agreement") is None else ref["agreement"],
+                "pii_found_inside": inside[block.block_id], "box": _box([block.bbox]),
+            })
+    return queue
+
+
 def _table(headings: list[str], lines: list[list]) -> list[str]:
     out = ["| " + " | ".join(headings) + " |", "|" + "---|" * len(headings)]
     return out + ["| " + " | ".join(str(cell) for cell in line) + " |" for line in lines]
@@ -105,7 +157,7 @@ def _ranges(numbers: list[int]) -> str:
     return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in parts) or "none"
 
 
-def summary(doc: Document, tokenized: list[Tokenized]) -> str:
+def summary(doc: Document, tokenized: list[Tokenized], mode: str = "findings") -> str:
     """The per-file summary, as Markdown."""
     items = [t for t in tokenized if t.finding.doc_id == doc.doc_id]
     unit = "slide" if doc.format == "pptx" else "page"
@@ -118,11 +170,11 @@ def summary(doc: Document, tokenized: list[Tokenized]) -> str:
         facts.append([f"{unit.capitalize()}s read by OCR", f"{len(doc.ocr_pages())} ({_ranges(doc.ocr_pages())})"])
         withheld = [p.number for p in doc.pages if p.quarantined]
         facts.append([f"{unit.capitalize()}s withheld whole (unreadable)", f"{len(withheld)} ({_ranges(withheld)})"])
-    trusted = [b for b in pictures if (b.native_ref or {}).get("trusted") and not b.quarantined]
+    trusted = [b for b in pictures if why_whole(b, mode) is None]
     facts.append(["Pictures", len(pictures)])
     facts.append(["Pictures read by two OCR engines", sum(len((b.native_ref or {}).get("engines", [])) > 1 for b in pictures)])
-    facts.append(["Pictures the engines agreed on (may be masked word by word)", len(trusted)])
-    facts.append(["Pictures masked whole (not read reliably)", len(pictures) - len(trusted)])
+    facts.append(["Pictures masked word by word", len(trusted)])
+    facts.append(["Pictures masked whole and queued for human review", len(pictures) - len(trusted)])
     cover = Counter(entry[0] for b in trusted for entry in (b.native_ref or {}).get("cover", []))
     facts.append(["Words in trusted pictures the engines read differently (covered unless one read an ordinary word)", cover["unconfirmed"]])
     facts.append(["Covered inside trusted pictures: faces", cover["face"]])
@@ -161,7 +213,9 @@ def summary(doc: Document, tokenized: list[Tokenized]) -> str:
     return "\n".join(lines)
 
 
-def exposure(docs: list[Document], tokenized: list[Tokenized], verified: bool | None = None) -> str:
+def exposure(
+    docs: list[Document], tokenized: list[Tokenized], verified: bool | None = None, mode: str = "findings"
+) -> str:
     """The report across all files, as Markdown."""
     names = {doc.doc_id: doc.name for doc in docs}
     lines = ["# PII exposure report", ""]
@@ -194,11 +248,24 @@ def exposure(docs: list[Document], tokenized: list[Tokenized], verified: bool | 
         lines += _table(["Category", "Identities"], sorted(kinds.items(), key=lambda pair: (-pair[1], pair[0]))) + [""]
     lines += ["Text inside a picture is read with less certainty than typed text. It is never passed downstream, "
               "and a picture is masked whole unless two OCR engines agreed on it. This list may be incomplete.", ""]
+
+    queue = review_queue(docs, tokenized, mode)
+    total = sum(1 for doc in docs for b in doc.blocks if b.type is BlockType.IMAGE_REGION)
+    lines += ["## Pictures queued for human review", ""]
+    lines += [f"{len(queue)} of {total} pictures were masked whole. Each is a picture the pipeline could not show "
+              "safely by itself; a person should look at the original before it is relied on. They are listed in "
+              "`review_queue.csv`.", ""]
+    if queue:
+        reasons = Counter(re.sub(r"\d+%", "too little", row["reason"]) for row in queue)
+        lines += _table(["Reason", "Pictures"], sorted(reasons.items(), key=lambda pair: (-pair[1], pair[0]))) + [""]
     return "\n".join(lines)
 
 
-def write(folder: str | Path, docs: list[Document], tokenized: list[Tokenized], verified: bool | None = None) -> list[Path]:
-    """Write the audit log, a summary per file and the exposure report."""
+def write(
+    folder: str | Path, docs: list[Document], tokenized: list[Tokenized], verified: bool | None = None,
+    pictures: str = "findings",
+) -> list[Path]:
+    """Write the audit log, the review queue, a summary per file and the exposure report."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     written = [folder / "audit.csv"]
@@ -208,7 +275,12 @@ def write(folder: str | Path, docs: list[Document], tokenized: list[Tokenized], 
         writer.writerows(rows(docs, tokenized))
     for doc in docs:
         written.append(folder / f"{Path(doc.name).stem}.summary.md")
-        written[-1].write_text(summary(doc, tokenized), encoding="utf-8")
+        written[-1].write_text(summary(doc, tokenized, pictures), encoding="utf-8")
     written.append(folder / "exposure.md")
-    written[-1].write_text(exposure(docs, tokenized, verified), encoding="utf-8")
+    written[-1].write_text(exposure(docs, tokenized, verified, pictures), encoding="utf-8")
+    written.append(folder / "review_queue.csv")
+    with open(written[-1], "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=REVIEW_COLUMNS)
+        writer.writeheader()
+        writer.writerows(review_queue(docs, tokenized, pictures))
     return written

@@ -15,6 +15,13 @@ checks it, twice, in ways that do not share a weakness:
 
 If either check finds anything the outputs are withheld and the run fails.
 
+A picture masked word by word gets a third look. The re-scan uses the same
+OCR and the same detectors that produced the masks, so it shares their blind
+spot: a name it could not recognise before, it cannot recognise now. What it
+can still see is the shape of a bad mask: initials left standing beside a
+covered surname, or a word a mask cuts through. Either sends that picture
+back to be masked whole.
+
 What this cannot do: find PII that was never detected and so was never in the
 list of values. It proves "everything we found is gone", not "there was
 nothing else to find". That second claim is what the labelled evaluation is for.
@@ -33,7 +40,7 @@ import pymupdf
 
 from ..detect.finding import Finding
 from ..extract import extract
-from ..extract.ir import BlockType, Document
+from ..extract.ir import BlockType, Container, Document
 from .tokens import Tokenized
 
 TOKEN = re.compile(r"<[A-Z][A-Z_]*_\d+>")
@@ -109,8 +116,15 @@ def check_text(
     return problems + _rescan(name, lines, rules.detect) + _rescan(name, blocks, detect)
 
 
-def check_file(path: str | Path, tokenized: list[Tokenized], detect: Detect) -> list[Problem]:
-    """Both checks on a masked PDF, DOCX or PPTX."""
+def check_file(
+    path: str | Path, tokenized: list[Tokenized], detect: Detect, original: Document | None = None, masks: dict | None = None
+) -> list[Problem]:
+    """Both checks on a masked PDF, DOCX or PPTX.
+
+    original and masks (the extraction of the source file, and what
+    office.picture_boxes decided for it) add the look for scraps left beside
+    the masks inside pictures.
+    """
     path = Path(path)
     values = known_values(tokenized)
     problems = [
@@ -118,7 +132,37 @@ def check_file(path: str | Path, tokenized: list[Tokenized], detect: Detect) -> 
         for where, text in _raw_contents(path)
         for token in find_values(text, values)
     ]
-    return problems + _rescan(path.name, extract(path), detect)
+    again = extract(path)
+    problems += _rescan(path.name, again, detect)
+    if original is not None and masks:
+        problems += _scraps(path.name, again, original, masks)
+    return problems
+
+
+def _scraps(name: str, again: Document, original: Document, masks: dict) -> list[Problem]:
+    """Pictures of the masked file in which something readable is left beside a mask."""
+    from .office import residue  # here: office imports nothing from verify, and stays that way
+
+    def words_of(blocks) -> list:
+        return [(b.text[w.start : w.end], w.bbox, w.conf) for b in blocks for w in b.words]
+
+    before = [b for b in original.blocks if b.type is BlockType.IMAGE_REGION]
+    after = [b for b in again.blocks if b.type is BlockType.IMAGE_REGION]
+    problems = []
+    if original.format == "pdf":
+        # Positions are page positions, so a picture is found by its page.
+        for page in sorted({b.page for b in before if masks.get(b.block_id)}):
+            boxes = [box for b in before if b.page == page for box in masks.get(b.block_id) or []]
+            read = [b for b in again.blocks if b.page == page and b.container is Container.IMAGE]
+            if residue(words_of(read), boxes):
+                problems.append(Problem(name, "residue", f"page {page}, image", "scrap beside a mask", page, True))
+    elif len(before) == len(after):
+        # Positions are pixels of the picture, which masking does not resize: found by its place in the file.
+        for index, (old, new) in enumerate(zip(before, after)):
+            if masks.get(old.block_id) and residue(words_of(again.children(new.block_id)), masks[old.block_id]):
+                problems.append(Problem(name, "residue", f"picture {index + 1}", "scrap beside a mask", old.page, True,
+                                        (index, len(after))))
+    return problems
 
 
 def ensure_clean(problems: list[Problem]) -> None:
