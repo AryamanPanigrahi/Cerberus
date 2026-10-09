@@ -31,7 +31,8 @@ from . import allowlist
 from .finding import Finding, location_of, make
 from .merge import resolve_overlaps
 
-MODEL_PATH = "models/gliner-pii-small-v1.0"  # a local folder; override with CERBERUS_NER_MODEL
+# A local folder beside the package, found wherever the code is run from; override with CERBERUS_NER_MODEL.
+MODEL_PATH = str(Path(__file__).resolve().parents[2] / "models" / "gliner-pii-small-v1.0")
 LABELS = {"person": "PERSON", "address": "ADDRESS"}  # what the model is asked for -> our entity
 # Also asked for, then thrown away. The model gives each span one label, so
 # offering it "organization" and "job title" stops a company or a role being

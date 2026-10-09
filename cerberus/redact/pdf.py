@@ -96,11 +96,29 @@ def mask_pdf(
         out.parent.mkdir(parents=True, exist_ok=True)
         # Erasing pixels stores the page images uncompressed; pack them again
         # so the masked file is not several times the size of the original.
-        if hasattr(pdf, "rewrite_images"):
-            pdf.rewrite_images(quality=80, lossy=True, lossless=True)
+        for number in marks:
+            _repack_images(pdf, pdf[number - 1])
         # A full rewrite: unreferenced objects are dropped, so removed content is gone from the file.
         pdf.save(str(out), garbage=4, deflate=True, clean=True)
     return out
+
+
+def _repack_images(pdf, page) -> None:
+    """Store the page's uncompressed images as JPEG again.
+
+    Done image by image from its pixels. The library's own bulk recompression
+    was used first; on a greyscale scan it wrote the page back as stripes of
+    its own heading. An image that is already a JPEG was not touched by the
+    redaction and is left as it is.
+    """
+    for entry in page.get_images():
+        xref = entry[0]
+        if "DCTDecode" in pdf.xref_get_key(xref, "Filter")[1] or entry[1]:  # a JPEG, or one with a soft mask
+            continue
+        pixmap = pymupdf.Pixmap(pdf, xref)
+        if pixmap.alpha or pixmap.colorspace is None or pixmap.n not in (1, 3):
+            continue  # transparency, a stencil or CMYK: left as the redaction wrote it
+        page.replace_image(xref, stream=pixmap.tobytes("jpeg", jpg_quality=80))
 
 
 def _rect(box) -> pymupdf.Rect:
