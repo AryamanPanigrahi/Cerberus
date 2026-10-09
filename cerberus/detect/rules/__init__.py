@@ -84,7 +84,7 @@ def _emails(ctx: _Context) -> Iterator[Hit]:
 
 
 _WORD = re.compile(r"\S+")
-_AT_LOOKALIKES = "eaocgq0©&€"  # what OCR makes of an "@" in small print
+_AT_LOOKALIKES = "eaocgqm0"  # letters OCR makes of an "@" in small print; any odd symbol counts too
 
 
 def _emails_without_at(ctx: _Context) -> Iterator[Hit]:
@@ -108,7 +108,10 @@ def _emails_without_at(ctx: _Context) -> Iterator[Hit]:
                     best = (wrong, cut)
         # Where the domain fits best, the character in front of it must be a misread "@":
         # "www.corp.example" fits best after a full stop, and is a web address.
-        if best is None or best[1] < 4 or lower[best[1] - 1] not in _AT_LOOKALIKES:
+        if best is None or best[1] < 4:
+            continue
+        before = lower[best[1] - 1]
+        if before not in _AT_LOOKALIKES and (before.isalnum() or before in "._-"):
             continue
         local = word[: best[1] - 1]
         # A log line glues a key in front ("user=j.sample..."); the address starts after it.

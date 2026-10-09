@@ -289,6 +289,14 @@ def test_scraps_left_beside_a_mask_are_counted():
     assert office.residue([read("J.", 84, confidence=0.2)], mask) == 0  # the OCR was guessing
     assert office.residue([read("xx", 120)], mask) == 0  # read under the grey: not text
     assert office.residue([read("J.", 400)], mask) == 0  # initials nowhere near a mask
+    # A label on the line above, touched only by the mask's margin, is not a word cut in half.
+    label = ("NAME", BBox(100, 0, 150, 11, Unit.PT), 0.9)
+    assert office.residue([label], mask) == 0
+    # The end of an ordinary word clipped by the next mask's margin is not half a value.
+    common = frozenset({"effective", "payment"})
+    assert office.residue([read("effecti", 60)], mask, common=common) == 0
+    assert office.residue([read("Sampl", 80)], mask, common=common) == 1  # a capitalised scrap still counts
+    assert office.residue([read("zqxwv", 80)], mask, common=common) == 1
 
 
 @pytest.mark.parametrize("change", [{"trusted": False}, {"quarantined": True}])
@@ -419,3 +427,67 @@ def test_verification_finds_initials_left_beside_a_mask_in_a_masked_pdf_page():
     read("J.", 84)
     (problem,) = verify._scraps("form.pdf", again, original, masks)
     assert (problem.check, problem.page, problem.in_picture) == ("residue", 1, True)
+
+
+# --- which second engine ----------------------------------------------------
+
+
+def test_the_second_engine_is_chosen_by_what_is_installed_and_what_is_asked(monkeypatch):
+    from cerberus.extract import rapid
+
+    def installed(rapidocr, doctr):
+        monkeypatch.setattr(rapid, "available", lambda: rapidocr)
+        monkeypatch.setattr(neural, "available", lambda: doctr)
+
+    monkeypatch.setenv("CERBERUS_OCR", "both")
+    installed(True, True)
+    assert images.second_engine() == "rapidocr"  # it read more of the labelled figures, faster
+    installed(False, True)
+    assert images.second_engine() == "doctr"
+    installed(False, False)
+    assert images.second_engine() is None and not images.use_neural()
+
+    installed(True, True)
+    monkeypatch.setenv("CERBERUS_OCR", "doctr")
+    assert images.second_engine() == "doctr"
+    monkeypatch.setenv("CERBERUS_OCR", "tesseract")
+    assert images.second_engine() is None
+    # Asking for an engine that is not installed gives one engine, not a different second one.
+    installed(False, True)
+    monkeypatch.setenv("CERBERUS_OCR", "rapidocr")
+    assert images.second_engine() is None
+
+
+def test_a_reading_names_its_second_engine_on_the_lines_it_emits():
+    doc = Document("d0c", "card.docx", "docx")
+    region = doc.add(BlockType.IMAGE_REGION, container=Container.IMAGE)
+    from cerberus.extract import layout
+
+    first = layout.build_lines([word("Badge", 10, 10, 60, 30)])
+    second = layout.build_lines([word("Badge", 11, 11, 61, 31)])
+    images.emit(doc, region, images.Reading(first, 0.9, (200, 100), second=second, agreement=1.0, engine="rapidocr"))
+    assert [(b.native_ref or {}).get("engine") for b in doc.children(region.block_id)] == ["tesseract", "rapidocr"]
+    assert region.native_ref["engines"] == ["tesseract", "rapidocr"] and region.native_ref["trusted"]
+    # A reading cached before there was a choice has no engine name: it was docTR.
+    old = Document("d0c2", "card.docx", "docx")
+    region = old.add(BlockType.IMAGE_REGION, container=Container.IMAGE)
+    images.emit(old, region, images.Reading(first, 0.9, (200, 100), second=second, agreement=1.0))
+    assert region.native_ref["engines"] == ["tesseract", "doctr"]
+
+
+@pytest.mark.neural
+def test_rapidocr_reads_a_clear_picture_word_by_word():
+    from cerberus.extract import rapid
+
+    if not rapid.available():
+        pytest.skip("RapidOCR is not installed")
+    picture = Image.open(io.BytesIO(card()))
+    words = rapid.read_pixels(picture)
+    text = " ".join(w.text for w in words)
+    assert "EMP-00002" in text and "Badge" in text
+    number = next(w for w in words if w.text == "EMP-00002")
+    assert 100 < number.y0 < number.y1 < 150 and number.x0 > 100  # placed on the second line, after "Badge"
+    # A border is cut off before reading and added back to the positions.
+    shifted = rapid.read_pixels(picture, border=6)
+    again = next(w for w in shifted if w.text == "EMP-00002")
+    assert abs(again.x0 - number.x0) < 6 and abs(again.y0 - number.y0) < 6

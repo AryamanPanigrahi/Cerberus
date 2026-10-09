@@ -141,7 +141,9 @@ def check_file(
 
 def _scraps(name: str, again: Document, original: Document, masks: dict) -> list[Problem]:
     """Pictures of the masked file in which something readable is left beside a mask."""
-    from .office import residue  # here: office imports nothing from verify, and stays that way
+    from .office import common_words, residue  # here: office imports nothing from verify, and stays that way
+
+    common = common_words(original)
 
     def words_of(blocks) -> list:
         return [(b.text[w.start : w.end], w.bbox, w.conf) for b in blocks for w in b.words]
@@ -154,12 +156,12 @@ def _scraps(name: str, again: Document, original: Document, masks: dict) -> list
         for page in sorted({b.page for b in before if masks.get(b.block_id)}):
             boxes = [box for b in before if b.page == page for box in masks.get(b.block_id) or []]
             read = [b for b in again.blocks if b.page == page and b.container is Container.IMAGE]
-            if residue(words_of(read), boxes):
+            if residue(words_of(read), boxes, common=common):
                 problems.append(Problem(name, "residue", f"page {page}, image", "scrap beside a mask", page, True))
     elif len(before) == len(after):
         # Positions are pixels of the picture, which masking does not resize: found by its place in the file.
         for index, (old, new) in enumerate(zip(before, after)):
-            if masks.get(old.block_id) and residue(words_of(again.children(new.block_id)), masks[old.block_id]):
+            if masks.get(old.block_id) and residue(words_of(again.children(new.block_id)), masks[old.block_id], common=common):
                 problems.append(Problem(name, "residue", f"picture {index + 1}", "scrap beside a mask", old.page, True,
                                         (index, len(after))))
     return problems

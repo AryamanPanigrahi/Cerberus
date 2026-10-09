@@ -28,9 +28,9 @@ Only counts are printed.
 
 Run:  python -m cerberus.eval.recall <document> --labels <workbook.xlsx> --sheet <tab>
 
-With --compare-ocr the document is processed twice, once reading pictures with
-Tesseract alone and once with Tesseract and docTR together, and the two are
-set side by side. Add --location image to score only what is inside pictures.
+With --compare-ocr the document is processed three times, reading pictures with
+Tesseract alone, with Tesseract and docTR, and with Tesseract and RapidOCR, and
+the three are set side by side. Add --location image to score only what is inside pictures.
 """
 
 from __future__ import annotations
@@ -315,11 +315,12 @@ def comparison(runs: dict[str, list[Outcome]]) -> str:
             cells.append(f"{sum(o.how != 'missed' for o in mine):>4} of {len(mine):<4}"
                          f"{_share(sum(o.how != 'missed' for o in mine), len(mine)):>8}    ")
         lines.append(f"  {kind:<22}" + "".join(f"{cell:>24}" for cell in cells))
-    first, last = runs[names[0]], runs[names[-1]]
+    before = names[-2] if len(names) > 1 else names[0]  # the run just before the last: the nearest rival
+    first, last = runs[before], runs[names[-1]]
     gained = sum(a.how == "missed" and b.how != "missed" for a, b in zip(first, last))
     lost = sum(a.how != "missed" and b.how == "missed" for a, b in zip(first, last))
     lines.append("")
-    lines.append(f"  labels found only with {names[-1]}: {gained}; found only with {names[0]}: {lost}")
+    lines.append(f"  labels found only with {names[-1]}: {gained}; found only with {before}: {lost}")
     return "\n".join(lines)
 
 
@@ -389,7 +390,8 @@ def main(argv: list[str] | None = None) -> None:
     runs = {}
     before = os.environ.get("CERBERUS_OCR")
     try:
-        for name, setting in (("Tesseract alone", "tesseract"), ("Tesseract + docTR", "both")):
+        for name, setting in (("Tesseract alone", "tesseract"), ("Tesseract + docTR", "doctr"),
+                              ("Tesseract + RapidOCR", "rapidocr")):
             print(f"\n=== pictures read by: {name} ===")
             os.environ["CERBERUS_OCR"] = setting
             runs[name] = measure(Path(args.out) / setting)

@@ -71,8 +71,8 @@ def one_per_place(docs: list[Document], findings: list[Finding]) -> list[Finding
     seen: dict[tuple, list[tuple[int, str, BBox]]] = {}  # (doc, picture, entity) -> kept findings there
     candidates = [f for f in findings if f.location == "image" and f.doc_id in by_id and engine(f)]
     others = [f for f in findings if not (f.location == "image" and f.doc_id in by_id and engine(f))]
-    # docTR reads small print better, so between equals its wording is the one kept.
-    for finding in sorted(candidates, key=lambda f: (-f.confidence, engine(f) != "doctr", -(f.end - f.start))):
+    # The second engine reads small print better, so between equals its wording is the one kept.
+    for finding in sorted(candidates, key=lambda f: (-f.confidence, engine(f) == "tesseract", -(f.end - f.start))):
         box = box_of(by_id[finding.doc_id], finding)
         key = (finding.doc_id, region(finding), finding.entity)
         if box is not None:

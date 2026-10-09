@@ -364,30 +364,52 @@ def _joined(boxes: list[tuple[float, float, float, float]]) -> list[tuple[float,
     return [tuple(box) for box in out]
 
 
-def residue(words: list[tuple[str, object, float]], masks: list, min_confidence: float = 0.5) -> int:
+def residue(
+    words: list[tuple[str, object, float]], masks: list, min_confidence: float = 0.5,
+    common: frozenset[str] = frozenset(),
+) -> int:
     """How many readable scraps are left beside the masks of one masked picture.
 
     words are (text, box, confidence) as read from the masked picture; masks
     are the rectangles that were covered in it. Two things count: initials
-    with a full stop standing next to a mask, and a word that a mask cuts
-    through (part inside, part outside), which is a value only half covered.
+    with a full stop standing next to a mask, and a word on a mask's own line
+    that the mask cuts through sideways (part of its width covered, part
+    not), which is a value only half covered. A label printed just above a
+    covered value is touched by the mask's margin and is not a cut. Nor is an
+    ordinary word in small letters whose end a neighbouring mask's margin
+    clipped: what is left showing is the rest of an ordinary word (common is
+    the document's own vocabulary).
     """
     count = 0
     for text, place, confidence in words:
         if confidence < min_confidence or sum(c.isalnum() for c in text) == 0:
             continue
         box = (place.x0, place.y0, place.x1, place.y1)
-        area = max(1e-9, (box[2] - box[0]) * (box[3] - box[1]))
-        inside = max(
-            (max(0.0, min(box[2], m[2]) - max(box[0], m[0])) * max(0.0, min(box[3], m[3]) - max(box[1], m[1])) / area
-             for m in masks), default=0.0,
-        )
-        if inside >= 0.6:
-            continue  # under a mask: whatever the OCR made of the grey, it is not text
-        cut = inside >= 0.15 and sum(c.isalnum() for c in text) >= 2
+        width, height = max(1e-9, box[2] - box[0]), max(1e-9, box[3] - box[1])
+        cut = under = False
+        for m in masks:
+            down = (min(box[3], m[3]) - max(box[1], m[1])) / height
+            across = (min(box[2], m[2]) - max(box[0], m[0])) / width
+            if down < 0.5 or across <= 0:
+                continue  # not on the mask's line: the margin of a mask over the next line down is not a cut
+            if across >= 0.6:
+                under = True  # under a mask: whatever the OCR made of the grey, it is not text
+            elif across >= 0.15:
+                cut = True
+        if under:
+            continue
+        cut = cut and sum(c.isalnum() for c in text) >= 2 and not _ordinary_scrap(text, common)
         if cut or (residue_like(text) and any(beside(box, m, reach=1.0) for m in masks)):
             count += 1
     return count
+
+
+def _ordinary_scrap(text: str, common: frozenset[str]) -> bool:
+    """A word in small letters that is an ordinary word, or the start or end of one."""
+    word = re.sub(r"[^A-Za-z]", "", text)
+    if len(word) < 3 or not word.islower() or word != re.sub(r"[\W_]", "", text):
+        return False
+    return _harmless(word, common) or any(known.startswith(word) or known.endswith(word) for known in common)
 
 
 def _shared(a, b) -> float:

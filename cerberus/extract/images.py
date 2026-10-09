@@ -11,8 +11,10 @@ emitted as children of its image region, marked as image content.
 - A picture that cannot be opened or converted is quarantined, as is one whose
   text reads below the confidence threshold: unreadable is not the same as empty.
 
-Two engines read each picture when the second one is installed: Tesseract and
-docTR (see neural.py). They fail in different ways, so what either one reads
+Two engines read each picture when a second one is installed: Tesseract, and
+RapidOCR (rapid.py) or, failing that, docTR (neural.py). CERBERUS_OCR chooses:
+"tesseract" for one engine, "rapidocr" or "doctr" to name the second. They
+fail in different ways, so what either one reads
 is kept, each as its own lines, and the detectors see both. Having two
 readings also gives a way to know how far to trust them:
 
@@ -41,7 +43,7 @@ from statistics import median
 
 from PIL import Image, UnidentifiedImageError
 
-from . import figures, layout, neural, ocr, regions
+from . import figures, layout, neural, ocr, rapid, regions
 from .ir import BBox, Block, BlockType, Container, Document, Source, Unit, Word
 
 MIN_IMAGE_CONFIDENCE = 0.60  # starting value, shared with figures on scanned pages
@@ -63,7 +65,8 @@ class Reading:
     conf: float | None = None  # None: no text found
     size: tuple[int, int] | None = None
     error: str = ""  # set when the picture could not be read at all
-    second: list[layout.Line] | None = None  # the neural engine's words; None if it did not run
+    second: list[layout.Line] | None = None  # the second engine's words; None if it did not run
+    engine: str = ""  # which second engine read it; "" in readings cached before there was a choice (docTR)
     agreement: float | None = None  # share of the text both engines read alike; None if only one ran or no text
     cover: list[tuple[str, tuple[float, float, float, float]]] = field(default_factory=list)  # (kind, box) to mask
 
@@ -91,9 +94,27 @@ def use_cache(folder: str | Path | None) -> None:
     _cache = Path(folder) if folder else None
 
 
+def second_engine() -> str | None:
+    """Which second engine reads pictures, if any: "rapidocr", "doctr" or None.
+
+    CERBERUS_OCR=tesseract switches the second engine off (fast mode, and for
+    comparison); "rapidocr" or "doctr" asks for that one. Otherwise the best
+    one installed is used: RapidOCR read more of the labelled figures than
+    docTR, in less time, so it comes first.
+    """
+    wanted = os.environ.get("CERBERUS_OCR", "both").lower()
+    if wanted == "tesseract":
+        return None
+    order = [wanted] if wanted in ("rapidocr", "doctr") else ["rapidocr", "doctr"]
+    for name in order:
+        if (rapid if name == "rapidocr" else neural).available():
+            return name
+    return None
+
+
 def use_neural() -> bool:
-    """Is the second engine to be used? CERBERUS_OCR=tesseract switches it off, for comparison."""
-    return os.environ.get("CERBERUS_OCR", "both").lower() != "tesseract" and neural.available()
+    """Is a second engine in use?"""
+    return second_engine() is not None
 
 
 def best_reading(image: Image.Image) -> list[ocr.OcrWord]:
@@ -194,7 +215,9 @@ def examine(gray: Image.Image, border: int = 0, colour: Image.Image | None = Non
     """
     stored = None
     if _cache is not None:
-        engines = f"tesseract+{neural.engine_version()}" if use_neural() else "tesseract"
+        name = second_engine()
+        version = {"rapidocr": rapid.engine_version, "doctr": neural.engine_version}[name]() if name else ""
+        engines = f"tesseract+{version}" if name else "tesseract"
         key = hashlib.sha1(gray.tobytes() + f"{gray.size}{border}{engines}".encode()).hexdigest()
         stored = _cache / f"{key}.pkl"
         if stored.exists():
@@ -211,11 +234,16 @@ def _examine(gray: Image.Image, border: int, colour: Image.Image | None) -> Read
     words = read_pixels(gray, border, height)
     weight = sum(len(w.text) for w in words)
     reading = Reading(layout.build_lines(words), sum(w.conf * len(w.text) for w in words) / weight if words else None, gray.size)
-    if not use_neural():
+    name = second_engine()
+    if name is None:
         return reading
 
-    other = neural.read_pixels(gray, border, text_height=height)
+    if name == "rapidocr":  # reads the picture as it is, in colour if there is colour
+        other = rapid.read_pixels(colour if colour is not None and colour.size == gray.size else gray, border)
+    else:
+        other = neural.read_pixels(gray, border, text_height=height)
     reading.second = layout.build_lines(other)
+    reading.engine = name
     reading.agreement, doubtful = compare(words, other)
     if other:
         weight = sum(len(w.text) for w in other)
@@ -312,7 +340,7 @@ def emit(doc: Document, region: Block, reading: Reading, place=None) -> None:
         return
     region.source = Source.OCR
     region.ocr_conf = reading.conf
-    for engine, lines in (("tesseract", reading.lines), ("doctr", reading.second or [])):
+    for engine, lines in (("tesseract", reading.lines), (reading.engine or "doctr", reading.second or [])):
         for line in lines:
             text, spans = layout.compose(line.words)
             doc.add(
@@ -348,7 +376,7 @@ def describe(region: Block, reading: Reading, box) -> None:
         cover.append([kind, placed.x0, placed.y0, placed.x1, placed.y1])
     region.native_ref = {
         **(region.native_ref or {}),
-        "engines": ["tesseract"] + (["doctr"] if reading.second is not None else []),
+        "engines": ["tesseract"] + ([reading.engine or "doctr"] if reading.second is not None else []),
         "agreement": None if reading.agreement is None else round(reading.agreement, 3),
         "trusted": reading.trusted,
         "cover": cover,

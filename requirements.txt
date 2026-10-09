@@ -23,3 +23,6 @@ python-doctr
 # model (face_detection_yunet_2023mar.onnx, from the OpenCV model zoo) goes in models/opencv.
 opencv-python
 pyzbar
+# Second OCR engine for pictures, preferred over docTR when installed (models ship inside the package)
+rapidocr
+onnxruntime

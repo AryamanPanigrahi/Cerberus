@@ -232,6 +232,7 @@ def test_initials_and_a_surname_in_a_picture_are_reported_as_a_name():
 def test_an_address_whose_at_sign_was_misread_is_found_by_its_domain():
     assert in_picture(("auth user=j.sampleecorp.example ok", 0, 0)) == [("EMAIL", "j.sampleecorp.example", "email_at_misread")]
     assert in_picture(("mail o.placeholderacorp.exarnple sent", 0, 0)) == [("EMAIL", "o.placeholderacorp.exarnple", "email_at_misread")]
+    assert in_picture(("user=j.sample�corp.example src", 0, 0)) == [("EMAIL", "j.sample�corp.example", "email_at_misread")]
     # A web address, a domain these documents never use, and a word that merely ends alike are left alone.
     assert in_picture(("see www.corp.example today", 0, 0)) == []
     assert in_picture(("j.sampleeother.example", 0, 0)) == []
