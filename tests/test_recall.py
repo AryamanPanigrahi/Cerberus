@@ -71,7 +71,7 @@ def sample():
         label(4, 3, "PERSON", "Jane Sample"),  # a third time: only two were found
         label(5, 3, "EMPLOYEE_ID", "EMP-00001"),
         label(6, 3, "EMAIL", "j.sample@corp.example"),  # OCR changed a letter
-        label(7, 3, "PERSON", "Omar Placeholder"),  # found with a middle initial
+        label(7, 3, "PERSON", "Omar Placeholder"),  # found with a middle initial: most characters alike
         label(8, 4, "PERSON", "Ana Example", "prose"),  # in the text, not detected
         label(9, 4, "PHONE", "+00 0000 000000", "prose"),  # not in the text at all
     ]
@@ -83,9 +83,9 @@ def test_pairing_is_counted_and_strictest_first():
     outcomes, unmatched = recall.compare(labels, found, recall.page_texts(doc))
     assert [(o.label.row, o.how, o.distance) for o in outcomes] == [
         (2, "exact", 0), (3, "exact", 0), (4, "missed", 0), (5, "exact", 0),
-        (6, "near", 1), (7, "missed", 0), (8, "missed", 0), (9, "missed", 0),
+        (6, "near", 1), (7, "garbled", 0), (8, "missed", 0), (9, "missed", 0),
     ]
-    assert [f.text for f in unmatched] == ["Omar Q. Placeholder", "Risk Desk"]
+    assert [f.text for f in unmatched] == ["Risk Desk"]
     # A page number is part of the match: the same value on another page does not count.
     assert outcomes[2].in_text == "exact" and outcomes[6].in_text == "exact" and outcomes[7].in_text == "no"
     assert outcomes[6].context == "[[ana example]] signed. her number is on file."
@@ -105,11 +105,25 @@ def test_the_summary_holds_counts_and_no_values(tmp_path):
     outcomes, unmatched = recall.compare(labels, found, recall.page_texts(doc))
     text = recall.summary(outcomes, unmatched, len(found))
     assert [value for value in ("Sample", "Placeholder", "EMP-", "corp.example", "Risk Desk") if value in text] == []
-    assert "paired with a label: 4" in text and "not in the extracted text (an extraction or OCR loss): 2" in text
+    assert "paired with a label: 5" in text and "not in the extracted text (an extraction or OCR loss): 1" in text
 
     written = recall.write_report(tmp_path / "eval", doc, outcomes, unmatched, text)
     assert sorted(p.name for p in written) == [
         "labels.csv", "misses.csv", "near_misses.csv", "summary.txt", "unmatched_findings.csv",
     ]
     with open(tmp_path / "eval" / "misses.csv", encoding="utf-8-sig", newline="") as handle:
-        assert [row["sheet_row"] for row in csv.DictReader(handle)] == ["4", "7", "8", "9"]
+        assert [row["sheet_row"] for row in csv.DictReader(handle)] == ["4", "8", "9"]
+
+
+def test_a_value_found_but_read_badly_is_garbled_and_kept_out_of_the_other_counts():
+    doc = Document("d0c", "scan.pdf", "pdf")
+    block = doc.add(BlockType.PARAGRAPH, "Write to j.samp1e@corq.exarnple or call.", page=1)
+    found = [make(doc, block, 9, 31, entity="EMAIL", detector="rules", rule="fake", confidence=0.9, location="image")]
+    labels = [Label(row=2, page=1, type="EMAIL", text="j.sample@corp.example", location="image"),
+              Label(row=3, page=1, type="PHONE", text="+00 0000 000000", location="image")]
+    outcomes, unmatched = recall.compare(labels, found, recall.page_texts(doc))
+    assert [o.how for o in outcomes] == ["garbled", "missed"] and unmatched == []
+    text = recall.summary(outcomes, unmatched, len(found))
+    row = next(line for line in text.splitlines() if line.strip().startswith("all"))
+    # labels 2: exact 0, near 0, partial 0, garbled 1, missed 1 -> strict, +near and +partial stay 0%, +garbled 50%.
+    assert row.split() == ["all", "2", "0", "0", "0", "1", "1", "0.0%", "0.0%", "0.0%", "50.0%"]

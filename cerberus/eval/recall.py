@@ -11,6 +11,9 @@ paired more loosely, and reported apart so the strict figure stays honest:
     exact    same text
     near     within two character edits: OCR altered the value, we still found it
     partial  one text contains the other: found, but the edges differ
+    garbled  found in the right place but read badly: more than two characters
+             wrong, yet at least four in five the same. Counted apart from the
+             three above and never folded into them, so those keep their meaning
     missed   nothing on the page pairs with it
 
 Two questions are kept separate, because they have different cures:
@@ -38,6 +41,7 @@ import os
 import time
 from collections import Counter
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from ..detect.finding import Finding
@@ -45,6 +49,7 @@ from ..extract.ir import Document
 from .ground_truth import Label, load, normalise
 
 NEAR = 2  # character edits allowed for a "near" pairing
+GARBLED = 0.8  # share of characters alike for a "garbled" pairing
 _CONTEXT = 60  # characters of extracted text shown either side of a value
 # The labellers' names for our entity types, where they differ.
 _SAME_TYPE = {"EMPLOYEE_ID": "STAFF_ID"}
@@ -53,7 +58,7 @@ _SAME_TYPE = {"EMPLOYEE_ID": "STAFF_ID"}
 @dataclass
 class Outcome:
     label: Label
-    how: str = "missed"  # exact, near, partial or missed
+    how: str = "missed"  # exact, near, partial, garbled or missed
     finding: Finding | None = None
     distance: int = 0
     in_text: str = "no"  # is the value in the page's extracted text: exact, near or no
@@ -150,6 +155,21 @@ def compare(labels: list[Label], findings: list[Finding], texts: dict[int, str])
                 pair(outcome, finding, "partial")
                 break
 
+    # What is left: a finding that is plainly the labelled value, read with more than two errors.
+    alike = []
+    for index, outcome in enumerate(outcomes):
+        if outcome.how != "missed":
+            continue
+        wanted = normalise(outcome.label.text).replace(" ", "")
+        for finding in left:
+            if finding.page == outcome.label.page:
+                ratio = SequenceMatcher(None, wanted, normalise(finding.text).replace(" ", ""), autojunk=False).ratio()
+                if ratio >= GARBLED:
+                    alike.append((-ratio, index, id(finding), finding))
+    for _, index, _, finding in sorted(alike, key=lambda item: item[:3]):
+        if outcomes[index].how == "missed" and any(finding is f for f in left):
+            pair(outcomes[index], finding, "garbled")
+
     for outcome in outcomes:
         text = texts.get(outcome.label.page, "")
         place = locate(normalise(outcome.label.text), text)
@@ -173,8 +193,8 @@ def summary(outcomes: list[Outcome], unmatched: list[Finding], findings: int) ->
 
     def recall_table(title: str, key) -> None:
         lines.append(f"\nRecall {title}")
-        lines.append(f"  {'':<14}{'labels':>7}{'exact':>7}{'near':>6}{'partial':>8}{'missed':>7}"
-                     f"{'strict':>9}{'+near':>8}{'+partial':>9}")
+        lines.append(f"  {'':<14}{'labels':>7}{'exact':>7}{'near':>6}{'partial':>8}{'garbled':>8}{'missed':>7}"
+                     f"{'strict':>9}{'+near':>8}{'+partial':>9}{'+garbled':>9}")
         groups: dict[str, list[Outcome]] = {}
         for outcome in outcomes:
             groups.setdefault(key(outcome), []).append(outcome)
@@ -182,9 +202,9 @@ def summary(outcomes: list[Outcome], unmatched: list[Finding], findings: int) ->
             how = Counter(o.how for o in group)
             n = len(group)
             lines.append(
-                f"  {name or '?':<14}{n:>7}{how['exact']:>7}{how['near']:>6}{how['partial']:>8}{how['missed']:>7}"
-                f"{_share(how['exact'], n):>9}{_share(how['exact'] + how['near'], n):>8}"
-                f"{_share(n - how['missed'], n):>9}"
+                f"  {name or '?':<14}{n:>7}{how['exact']:>7}{how['near']:>6}{how['partial']:>8}{how['garbled']:>8}"
+                f"{how['missed']:>7}{_share(how['exact'], n):>9}{_share(how['exact'] + how['near'], n):>8}"
+                f"{_share(how['exact'] + how['near'] + how['partial'], n):>9}{_share(n - how['missed'], n):>9}"
             )
 
     recall_table("overall", lambda o: "all")
@@ -256,7 +276,7 @@ def write_report(folder: str | Path, doc: Document, outcomes: list[Outcome], unm
     files = {
         "labels.csv": rows,
         "misses.csv": [r for r in rows if r["outcome"] == "missed"],
-        "near_misses.csv": [r for r in rows if r["outcome"] in ("near", "partial")],
+        "near_misses.csv": [r for r in rows if r["outcome"] in ("near", "partial", "garbled")],
     }
     written = []
     for name, selected in files.items():
@@ -283,10 +303,11 @@ def comparison(runs: dict[str, list[Outcome]]) -> str:
     row("read by OCR (+near)", lambda outcomes: sum(o.in_text != "no" for o in outcomes))
     row("detected (exact)", lambda outcomes: sum(o.how == "exact" for o in outcomes))
     row("detected (+near)", lambda outcomes: sum(o.how in ("exact", "near") for o in outcomes))
-    row("detected (+partial)", lambda outcomes: sum(o.how != "missed" for o in outcomes))
+    row("detected (+partial)", lambda outcomes: sum(o.how in ("exact", "near", "partial") for o in outcomes))
+    row("detected (+garbled)", lambda outcomes: sum(o.how != "missed" for o in outcomes))
     kinds = sorted({o.label.type for outcomes in runs.values() for o in outcomes})
     lines.append("")
-    lines.append("  detected (+partial), by type")
+    lines.append("  detected (+garbled), by type")
     for kind in kinds:
         cells = []
         for name in names:

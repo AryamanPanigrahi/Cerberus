@@ -62,6 +62,7 @@ class Element:
     kind: str  # "h1", "h2", ..., "paragraph", "list_item", "cell"
     text: str
     image: bool = False  # text read inside a picture: scored separately
+    stand_in: bool = False  # the lower part of a merged cell: gives its row a first cell, is not counted itself
     parent: tuple[str, ...] = ()  # filled in by _link
     # where it sits, used only to work out the parent:
     box: int | None = None  # which [group] / [image] it is inside
@@ -110,7 +111,10 @@ def elements(doc: Document, blocks: list[Block]) -> list[Element]:
 
         if block.type is BlockType.TABLE_CELL:
             table = tables.setdefault(block.parent_id, len(tables))
-            out.append(Element("cell", text, image, table=table, row=block.row, col=block.col))
+            origin = by_id.get((block.native_ref or {}).get("merged_from"))
+            if origin is not None:
+                text = _one_line(origin.text)
+            out.append(Element("cell", text, image, stand_in=origin is not None, table=table, row=block.row, col=block.col))
         elif block.type is BlockType.HEADING:
             out.append(Element(f"h{len(block.section_path) + 1}", text, image, box=box_index))
         elif block.type in _KINDS:
@@ -141,6 +145,9 @@ def to_markdown(doc: Document, blocks: list[Block]) -> str:
         text = _one_line(block.text)
 
         if block.type is BlockType.TABLE_CELL:
+            origin = by_id.get((block.native_ref or {}).get("merged_from"))
+            if origin is not None:  # the lower part of a merged cell reads as the cell it continues
+                text = _one_line(origin.text)
             if open_table != (block.parent_id, block.row):
                 if open_table is None or open_table[0] != block.parent_id:
                     close()
@@ -256,7 +263,7 @@ def _link(items: list[Element]) -> list[Element]:
             item.parent = ("under", headings[-1][1] if headings else "")
         if item.kind.startswith("h") and item.box is None:
             headings.append((int(item.kind[1:]), item.text))
-    return [item for item in items if item.text]
+    return [item for item in items if item.text and not item.stand_in]
 
 
 # --- scoring ---------------------------------------------------------------

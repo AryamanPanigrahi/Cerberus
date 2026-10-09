@@ -89,3 +89,34 @@ def test_the_unordered_pairing_prefers_the_copy_in_the_right_place():
     reference = structure._link([cell("Name", 0, 0), cell("Role", 0, 1), cell("Jane", 1, 0), cell("Jane", 1, 1)])
     extracted = structure._link([cell("Name", 0, 0), cell("Role", 0, 1), cell("Jane", 1, 0), cell("Jane", 1, 1)])
     assert native._unordered(reference, list(reversed(extracted))).retained == 4
+
+
+def test_a_heading_made_by_outline_level_and_a_cell_merged_downwards_are_read_as_such(tmp_path):
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    d = docx.Document()
+    styled = d.add_paragraph("2. Approvals")  # no heading style: an outline level set on the paragraph itself
+    level = OxmlElement("w:outlineLvl")
+    level.set(qn("w:val"), "0")
+    styled._p.get_or_add_pPr().append(level)
+    d.add_paragraph("Named below.")
+    table = d.add_table(rows=3, cols=2)
+    for cell, text in zip([c for row in table.rows for c in row.cells],
+                          ("Group", "Member", "Risk", "Jane Sample", "", "Omar Placeholder")):
+        cell.text = text
+    table.cell(1, 0).merge(table.cell(2, 0))  # "Risk" covers both member rows
+    path = tmp_path / "groups.docx"
+    d.save(str(path))
+
+    reference = native.docx_reference(path)
+    assert [(e.kind, e.text) for e in reference] == [
+        ("h1", "2. Approvals"), ("paragraph", "Named below."), ("cell", "Group"), ("cell", "Member"),
+        ("cell", "Risk"), ("cell", "Jane Sample"), ("cell", "Omar Placeholder"),
+    ]
+    assert reference[1].parent == ("under", "2. Approvals")
+    # The second member's row starts with the merged cell above it, which is not counted twice.
+    assert reference[6].parent == ("cell", "Member", "Risk")
+
+    result = native.score_docx(path, extract(path))
+    assert (result.retained, result.total) == (7, 7)

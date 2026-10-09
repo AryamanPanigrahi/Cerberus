@@ -104,11 +104,13 @@ def test_table_is_in_document_order_with_headers_and_merges(document):
     assert find(document, "Jane Sample owns onboarding.").order < table.order
     assert table.order < find(document, "2. Evidence").order
     cells = document.children(table.block_id)
-    # The merged cell's lower half is not emitted; a two-paragraph cell is one block.
+    # A two-paragraph cell is one block. The merged cell's lower half is an empty stand-in
+    # that points at the cell it continues, so its row still has both of its cells.
     assert [c.text for c in cells] == [
-        "Name\n(full name)", "Mobile", "Jane Sample", "+1 (555) 0101", "Omar Placeholder",
+        "Name\n(full name)", "Mobile", "Jane Sample", "+1 (555) 0101", "Omar Placeholder", "",
     ]
-    assert [(c.row, c.col) for c in cells] == [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]
+    assert [(c.row, c.col) for c in cells] == [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]
+    assert cells[5].native_ref["merged_from"] == cells[3].block_id
     assert document.get(cells[3].header_id).text == "Mobile"
     assert all(c.container is Container.TABLE for c in cells)
 

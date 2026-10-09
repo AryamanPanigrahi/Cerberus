@@ -21,7 +21,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterator
 
-from ...extract.ir import Block, BlockType, Document, Source
+from ...extract.ir import Block, BlockType, Container, Document, Source
+from .. import allowlist
 from ..finding import Finding, location_of, make
 from ..merge import resolve_overlaps
 from . import validators
@@ -42,12 +43,18 @@ class Hit:
 class _Context:
     """What a rule may look at besides the match itself."""
 
-    def __init__(self, text: str, label: str, ocr: bool, staff_prefixes: frozenset[str]):
+    def __init__(
+        self, text: str, label: str, ocr: bool, staff_prefixes: frozenset[str],
+        picture: bool = False, domains: frozenset[str] = frozenset(), common: frozenset[str] = frozenset(),
+    ):
         self.text = text
         self.lower = text.lower()
-        self.label = label.lower()  # the cell's column header and row label, if any
+        self.label = label.lower()  # the cell's column header and row label, or the line above in a picture
         self.ocr = ocr
         self.staff_prefixes = staff_prefixes
+        self.picture = picture  # the text was read from inside a picture
+        self.domains = domains  # e-mail domains seen written correctly somewhere in these documents
+        self.common = common  # words this document writes in small letters: ordinary words, not names
 
     def near(self, start: int, end: int, words: tuple[str, ...], before: int = 60, after: int = 12) -> bool:
         """Is one of these words in the label, or just before / after the match?"""
@@ -72,6 +79,71 @@ def _emails(ctx: _Context) -> Iterator[Hit]:
     for m in (_EMAIL_OCR if ctx.ocr else _EMAIL).finditer(ctx.text):
         end = m.end() - len(m.group()) + len(m.group().rstrip(".-"))
         yield Hit(m.start(), end, "EMAIL", "email", 0.95, labelled=ctx.near(m.start(), end, ("email", "e-mail", "mail")))
+    if ctx.ocr and ctx.domains:
+        yield from _emails_without_at(ctx)
+
+
+_WORD = re.compile(r"\S+")
+_AT_LOOKALIKES = "eaocgq0©&€"  # what OCR makes of an "@" in small print
+
+
+def _emails_without_at(ctx: _Context) -> Iterator[Hit]:
+    """An address whose "@" the OCR read as a letter: "j.sampleecorp.example".
+
+    Without the "@" nothing marks it as an address, except that it ends in a
+    domain these documents use. So the end of each word is compared with the
+    domains seen written correctly elsewhere, allowing two wrong characters,
+    and the character before it must be one an "@" is commonly read as.
+    """
+    for m in _WORD.finditer(ctx.text):
+        word = m.group().rstrip(".,;:)")
+        if "@" in word or "." not in word:
+            continue
+        lower = word.lower()
+        best = None
+        for domain in ctx.domains:
+            for cut in range(max(1, len(lower) - len(domain) - 2), len(lower) - len(domain) + 3):
+                wrong = _edits(lower[cut:], domain, 2)
+                if wrong <= 2 and (best is None or wrong < best[0]):
+                    best = (wrong, cut)
+        # Where the domain fits best, the character in front of it must be a misread "@":
+        # "www.corp.example" fits best after a full stop, and is a web address.
+        if best is None or best[1] < 4 or lower[best[1] - 1] not in _AT_LOOKALIKES:
+            continue
+        local = word[: best[1] - 1]
+        # A log line glues a key in front ("user=j.sample..."); the address starts after it.
+        key = max(local.rfind("="), local.rfind(":"))
+        if key < 0 and "-" in local and "." in local.rsplit("-", 1)[1]:
+            key = local.rfind("-")
+        if len(local) - key - 1 < 3:
+            continue
+        yield Hit(m.start() + key + 1, m.start() + len(word), "EMAIL", "email_at_misread", 0.7, flags=("ocr_at",))
+
+
+def _edits(a: str, b: str, limit: int) -> int:
+    """Characters to insert, delete or replace to turn a into b; limit + 1 if more."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    previous = list(range(len(b) + 1))
+    for i, x in enumerate(a, 1):
+        current = [i]
+        for j, y in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (x != y)))
+        if min(current) > limit:
+            return limit + 1
+        previous = current
+    return previous[-1]
+
+
+def learn_domains(docs: list[Document]) -> frozenset[str]:
+    """E-mail domains written correctly at least twice in these documents."""
+    seen: dict[str, int] = {}
+    for doc in docs:
+        for block in doc.blocks:
+            for m in _EMAIL.finditer(block.text):
+                domain = m.group().rsplit("@", 1)[1].lower().rstrip(".")
+                seen[domain] = seen.get(domain, 0) + 1
+    return frozenset(domain for domain, count in seen.items() if count >= 2)
 
 
 # --- phone ----------------------------------------------------------------
@@ -151,6 +223,14 @@ def _cards(ctx: _Context) -> Iterator[Hit]:
         grouped = re.fullmatch(r"\d{4}([ -])\d{4}\1\d{4}\1\d{1,4}", m.group()) and digits[0] in "23456"
         if labelled or grouped:
             yield Hit(m.start(), m.end(), "CARD", "card_luhn", 0.95 if labelled else 0.85, labelled=labelled)
+    # A number already masked in the source ("4111-XXXX-XXXX-1111") cannot be checked, but its
+    # first and last four digits are still personal data: reported as a partial, like a masked PESEL.
+    for m in _CARD_MASKED.finditer(ctx.text):
+        labelled = ctx.near(m.start(), m.end(), _CARD_WORDS)
+        yield Hit(m.start(), m.end(), "CARD", "card_already_masked", 0.85 if labelled else 0.75, subtype="masked", labelled=labelled)
+
+
+_CARD_MASKED = re.compile(r"(?<!\w)\d{4}[ -]?[xX*•]{4}[ -]?[xX*•]{4}[ -]?\d{4}(?![\w-])")
 
 
 # --- PAN (India) -------------------------------------------------------------
@@ -165,6 +245,14 @@ def _pans(ctx: _Context) -> Iterator[Hit]:
             continue
         labelled = ctx.near(m.start(), m.end(), ("pan", "permanent account", "national id", "tax"))
         yield Hit(m.start(), m.end(), "PAN", "pan_structure", 0.95 if labelled else 0.8, subtype=holder, labelled=labelled)
+    if ctx.ocr:  # OCR can run a label into its value: "PANABCPS1234D"
+        for m in _PAN_GLUED.finditer(ctx.text):
+            holder = validators.pan_holder(m.group(1))
+            if holder is not None:
+                yield Hit(m.start(1), m.end(1), "PAN", "pan_structure", 0.9, subtype=holder, labelled=True)
+
+
+_PAN_GLUED = re.compile(r"(?<![A-Za-z0-9])PAN[:#.]?([A-Z]{5}\d{4}[A-Z])(?![A-Za-z0-9])")
 
 
 # --- PESEL (Poland) ----------------------------------------------------------
@@ -220,8 +308,9 @@ def _births(ctx: _Context) -> Iterator[Hit]:
 # --- staff identifiers -------------------------------------------------------
 
 _CODE = re.compile(r"(?<![A-Za-z0-9-])([A-Z]{2,5})(?:-[A-Z]{2})?-\d{3,6}(?![A-Za-z0-9-])")
-# OCR may read the hyphen as a dot, or put a space after it.
-_CODE_OCR = re.compile(r"(?<![A-Za-z0-9-])([A-Z]{2,5})(?:-[A-Z]{2})?[-.]\s?\d{3,6}(?![A-Za-z0-9-])")
+# OCR may read the hyphen as a dot, or put a space after it, or read the "=" in front of a
+# value as a hyphen ("owner -EMP.12345").
+_CODE_OCR = re.compile(r"(?<![A-Za-z0-9])([A-Z]{2,5})(?:-[A-Z]{2})?[-.]\s?\d{3,6}(?![A-Za-z0-9-])")
 _STAFF_LABEL = re.compile(
     r"\b(?:emp(?:loyee)?|staff|personnel|worker|vendor|contractor|member|director|badge|user)\b.{0,12}\bid\b"
     r"|\bemployee\s+identifier\b",
@@ -262,7 +351,32 @@ def _staff_ids(ctx: _Context) -> Iterator[Hit]:
         yield Hit(m.start(), m.end(), "STAFF_ID", "staff_id_prefix", 0.9 if labelled else 0.8, labelled=labelled)
 
 
-_RULES = (_emails, _phones, _ssn_and_tax, _cards, _pans, _pesels, _passports, _births, _staff_ids)
+# --- names written as initials and a surname, inside pictures ------------------
+
+_INITIALS_NAME = re.compile(r"(?<![A-Za-z])(?:[A-Z]{1,2}\.[^\S\n]?|[A-Z][^\S\n]){1,3}[A-Z][a-z]{2,}(?:[-'’][A-Z][a-z]+)?")
+
+
+def _initialled_names(ctx: _Context) -> Iterator[Hit]:
+    """ "J. Q. Sample" in a picture, as OCR leaves it: "JQ. Sample", "J. Q Sample", "J.Q.Sample".
+
+    Names are the language model's job, but it reads a line of a picture as a
+    string of half-garbled cells and often lets this form go. The form itself
+    is distinctive enough to report: initials, at least one with its full
+    stop, then a capitalised word that passes the test every name must pass
+    and is not an ordinary word of this document ("Appendix A. Scales" is a
+    heading). Only inside pictures, where a false alarm costs a grey box.
+    """
+    if not ctx.picture:
+        return
+    for m in _INITIALS_NAME.finditer(ctx.text):
+        surname = re.split(r"[.\s]+", m.group())[-1]
+        if surname.lower() in ctx.common or surname.split("-")[0].lower() in ctx.common:
+            continue
+        if "." in m.group() and allowlist.plausible_person(re.sub(r"\.(?=\S)", ". ", m.group())):
+            yield Hit(m.start(), m.end(), "PERSON", "initials_and_surname", 0.6)
+
+
+_RULES = (_emails, _phones, _ssn_and_tax, _cards, _pans, _pesels, _passports, _births, _staff_ids, _initialled_names)
 _NO_TEXT = {BlockType.TABLE, BlockType.SLIDE, BlockType.GROUP}
 
 
@@ -273,16 +387,20 @@ def detect(docs: list[Document]) -> list[Finding]:
     file apply to the others.
     """
     prefixes = learn_staff_prefixes(docs)
+    domains = learn_domains(docs)
     findings: list[Finding] = []
     for doc in docs:
         by_id = {b.block_id: b for b in doc.blocks}
         row_labels = _row_labels(doc)
+        above = _lines_above(doc)
+        common = allowlist.common_words(doc)
         for block in doc.blocks:
             if block.type in _NO_TEXT or not block.text.strip():
                 continue
             header = by_id[block.header_id].text if block.header_id else ""
-            label = f"{header} {row_labels.get(block.block_id, '')}"
-            ctx = _Context(block.text, label, block.source is Source.OCR, prefixes)
+            label = f"{header} {row_labels.get(block.block_id, '')} {above.get(block.block_id, '')}"
+            picture = block.container is Container.IMAGE
+            ctx = _Context(block.text, label, block.source is Source.OCR, prefixes, picture, domains, common)
             where = (("ocr",) if ctx.ocr else ()) + (("quarantined",) if block.quarantined else ())
             for rule in _RULES:
                 for hit in rule(ctx):
@@ -296,6 +414,35 @@ def detect(docs: list[Document]) -> list[Finding]:
                         )
                     )
     return resolve_overlaps(findings)
+
+
+def _lines_above(doc: Document) -> dict[str, str]:
+    """For each line read inside a picture, the text of the line directly above it.
+
+    On a card or a form the label is printed above its value ("DATE OF BIRTH",
+    then the date on the next line), so the keyword a rule looks for is not in
+    the same line. Only a short line with no digits counts as a label, and only
+    from the same OCR engine, close above, and overlapping sideways.
+    """
+    lines: dict[tuple, list[Block]] = {}
+    for block in doc.blocks:
+        if block.container is Container.IMAGE and block.parent_id and block.bbox is not None and block.text.strip():
+            lines.setdefault((block.parent_id, (block.native_ref or {}).get("engine")), []).append(block)
+    out: dict[str, str] = {}
+    for group in lines.values():
+        for block in group:
+            height = block.bbox.y1 - block.bbox.y0
+            best = None
+            for other in group:
+                if other is block or len(other.text.split()) > 4 or any(c.isdigit() for c in other.text):
+                    continue  # a label is a few words with no digits; a line of values is not a label
+                gap = block.bbox.y0 - other.bbox.y1
+                sideways = min(block.bbox.x1, other.bbox.x1) - max(block.bbox.x0, other.bbox.x0)
+                if -0.3 * height <= gap <= 1.5 * height and sideways > 0 and (best is None or gap < best[0]):
+                    best = (gap, other.text)
+            if best is not None:
+                out[block.block_id] = best[1]
+    return out
 
 
 def _row_labels(doc: Document) -> dict[str, str]:

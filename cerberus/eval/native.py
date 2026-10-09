@@ -22,9 +22,9 @@ What counts as retained (the definition in structure.py):
   order is. So order is not scored for shapes: an element is retained if it
   is on the right slide as the right kind. Table cells are scored as in DOCX.
 
-Left out of the reference, and said so in the report: text boxes, headers,
-footers and footnotes in a DOCX, and tables nested inside a cell. They are
-extracted, but the few lines here do not enumerate them.
+Left out of the reference: text boxes, headers, footers and footnotes in a
+DOCX, and tables nested inside a cell. They are extracted, but the few lines
+here do not enumerate them.
 
 Run:  python -m cerberus.eval.native FILE [FILE ...]
 """
@@ -45,15 +45,30 @@ _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 def docx_reference(path: str | Path) -> list[Element]:
-    """Every body paragraph and table cell of a DOCX, in file order, with its kind and parent."""
+    """Every body paragraph and table cell of a DOCX, in file order, with its kind and parent.
+
+    Three things in the format that a first, simpler version of this got wrong
+    (it then blamed the extractor for 40 elements that were in fact right):
+
+    - a heading is a paragraph with an outline level, set on the paragraph or
+      inherited from its style. Looking only for styles named "Heading N"
+      misses a paragraph given an outline level directly;
+    - a cell's text can sit inside a content control, a field or an inserted
+      revision, none of which python-docx's `.text` reads;
+    - a cell merged down several rows is stored once, with empty placeholders
+      below it. For the rows below, it is still the first cell of the row.
+    """
     import docx
-    from docx.table import Table
     from docx.text.paragraph import Paragraph
 
     source = docx.Document(str(path))
     items: list[Element] = []
     levels: list[int] = []  # heading levels currently open, outermost first
     tables = 0
+
+    def text_of(cell) -> str:
+        own = [p for p in cell.iter(f"{_W}p") if next(a for a in p.iterancestors() if a.tag == f"{_W}tc") is cell]
+        return structure._one_line(" ".join(_text(p) for p in own))
 
     def walk(parent) -> None:
         nonlocal tables
@@ -64,11 +79,9 @@ def docx_reference(path: str | Path) -> list[Element]:
                     walk(content)
             elif child.tag == f"{_W}p":
                 paragraph = Paragraph(child, source)
-                text = structure._one_line(paragraph.text)
-                style = (paragraph.style.name if paragraph.style is not None else "") or ""
-                heading = re.fullmatch(r"Heading (\d)", style)
-                if heading and text:
-                    level = int(heading.group(1))
+                text = structure._one_line(_text(child))
+                level = _outline_level(child, paragraph)
+                if level is not None and text:
                     while levels and levels[-1] >= level:
                         levels.pop()
                     levels.append(level)
@@ -78,17 +91,70 @@ def docx_reference(path: str | Path) -> list[Element]:
                 else:
                     items.append(Element("paragraph", text))
             elif child.tag == f"{_W}tbl":
-                table = Table(child, source)
-                for r, row in enumerate(table._tbl.tr_lst):
+                above: dict[int, str] = {}  # column -> text of the merged cell that reaches down into it
+                for r, row in enumerate(child.iterchildren(f"{_W}tr")):
                     column = 0
-                    for cell in row.tc_lst:
-                        text = structure._one_line(" ".join(Paragraph(p, source).text for p in cell.p_lst))
-                        items.append(Element("cell", text, table=tables, row=r, col=column))
-                        column += cell.grid_span
+                    for cell in row.iterchildren(f"{_W}tc"):
+                        properties = cell.find(f"{_W}tcPr")
+                        merge = properties.find(f"{_W}vMerge") if properties is not None else None
+                        span = properties.find(f"{_W}gridSpan") if properties is not None else None
+                        width = int(span.get(f"{_W}val")) if span is not None else 1
+                        text = text_of(cell)
+                        if merge is not None and merge.get(f"{_W}val") != "restart" and not text:
+                            item = Element("cell", above.get(column, ""), stand_in=True, table=tables, row=r, col=column)
+                        else:
+                            item = Element("cell", text, table=tables, row=r, col=column)
+                            if merge is not None:
+                                above[column] = text
+                            else:
+                                above.pop(column, None)
+                        items.append(item)
+                        column += width
                 tables += 1
 
     walk(source.element.body)
     return structure._link(items)
+
+
+def _text(paragraph) -> str:
+    """The paragraph's own visible text, read from the XML.
+
+    python-docx's `.text` sees plain runs and hyperlinks and nothing else, so
+    a cell whose text sits in a field or an inserted revision reads as empty.
+    Here every text node counts, except deleted text (a different tag) and
+    what belongs to a text box drawn inside the paragraph, which is a
+    separate element of the document.
+    """
+    skipped = (f"{_W}txbxContent", "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback",
+               f"{_W}pict", f"{_W}instrText")
+    parts = []
+    for node in paragraph.iter(f"{_W}t", f"{_W}tab", f"{_W}br", f"{_W}cr"):
+        inside = False
+        for ancestor in node.iterancestors():
+            if ancestor is paragraph:
+                break
+            if ancestor.tag in skipped:
+                inside = True
+                break
+        if not inside:
+            parts.append(node.text or "" if node.tag == f"{_W}t" else " ")
+    return "".join(parts)
+
+
+def _outline_level(element, paragraph) -> int | None:
+    """The paragraph's heading level, from its own outline level or its style's; None for body text."""
+    def read(properties):
+        outline = properties.find(f"{_W}outlineLvl") if properties is not None else None
+        return int(outline.get(f"{_W}val")) if outline is not None else None
+
+    level = read(element.find(f"{_W}pPr"))
+    style = paragraph.style
+    while level is None and style is not None:
+        level = read(style.element.find(f"{_W}pPr"))
+        if level is None and (style.name or "").lower() == "title":
+            level = -1  # a title outranks every heading
+        style = style.base_style
+    return None if level is None or level >= 9 else level + 1  # 9 is the format's "body text"
 
 
 def _numbered(element, paragraph) -> bool:

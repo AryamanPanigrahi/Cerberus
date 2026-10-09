@@ -190,3 +190,68 @@ def test_overlapping_matches_resolve_to_the_surest():
 ])
 def test_lookalikes_are_left_alone(text):
     assert found(text) == []
+
+
+# --- what OCR does to values inside pictures -------------------------------
+
+
+def picture_lines(*lines, engine="doctr"):
+    """Lines read inside one picture, top to bottom: (text, x0, y0) each, 12 high."""
+    from cerberus.extract.ir import BBox, Unit
+
+    doc = Document("d0c", "scan.pdf", "pdf")
+    doc.add(BlockType.PARAGRAPH, "Write to j.sample@corp.example or o.placeholder@corp.example about the scales.")
+    region = doc.add(BlockType.IMAGE_REGION, container=Container.IMAGE, page=1)
+    for text, x, y in lines:
+        doc.add(BlockType.PARAGRAPH, text, container=Container.IMAGE, source=Source.OCR, page=1,
+                parent_id=region.block_id, bbox=BBox(x, y, x + 6 * len(text), y + 12, Unit.PT),
+                native_ref={"engine": engine})
+    return doc
+
+
+def in_picture(*lines):
+    return [(f.entity, f.text, f.rule) for f in rules.detect([picture_lines(*lines)]) if f.location == "image"]
+
+
+def test_a_pan_run_into_its_label_is_still_found():
+    assert in_picture(("Note PANABCPS1234D", 0, 0)) == [("PAN", "ABCPS1234D", "pan_structure")]
+    assert in_picture(("Note PANABCXS1234D", 0, 0)) == []  # the holder letter is still checked
+
+
+def test_initials_and_a_surname_in_a_picture_are_reported_as_a_name():
+    for text in ("Owner J. Q. Sample", "Owner JQ. Sample", "Owner J. Q Sample", "Owner J.Q.Sample"):
+        ((entity, value, rule),) = in_picture((text, 0, 0))
+        assert (entity, rule) == ("PERSON", "initials_and_surname") and value.endswith("Sample") and value[0] == "J"
+    assert in_picture(("Chief Risk Officer", 0, 0)) == []
+    # "scales" is a word this document writes in small letters: a heading, not a surname.
+    assert in_picture(("Appendix A. Scales", 0, 0)) == []
+    # Outside a picture the form is left to the language model.
+    assert found("Owner J. Q. Sample signed.") == []
+
+
+def test_an_address_whose_at_sign_was_misread_is_found_by_its_domain():
+    assert in_picture(("auth user=j.sampleecorp.example ok", 0, 0)) == [("EMAIL", "j.sampleecorp.example", "email_at_misread")]
+    assert in_picture(("mail o.placeholderacorp.exarnple sent", 0, 0)) == [("EMAIL", "o.placeholderacorp.exarnple", "email_at_misread")]
+    # A web address, a domain these documents never use, and a word that merely ends alike are left alone.
+    assert in_picture(("see www.corp.example today", 0, 0)) == []
+    assert in_picture(("j.sampleeother.example", 0, 0)) == []
+
+
+def test_a_staff_id_after_a_misread_equals_sign_is_found():
+    assert in_picture(("owner -EMP.00001 sev-high", 0, 0)) == [("STAFF_ID", "EMP.00001", "staff_id_prefix")]
+
+
+def test_a_card_number_already_masked_in_the_source_is_reported_as_partial():
+    (finding,) = rules.detect([doc_of("Matched card 4111-XXXX-XXXX-1111 in the file.")])
+    assert (finding.entity, finding.text, finding.subtype, finding.rule) == ("CARD", "4111-XXXX-XXXX-1111", "masked", "card_already_masked")
+    assert found("Order 4111-ABCD-EFGH-1111 shipped.") == []
+    assert in_picture(("match-4111-xxxx xxxx-1111 2026", 0, 0)) == [("CARD", "4111-xxxx xxxx-1111", "card_already_masked")]
+
+
+def test_a_label_on_the_line_above_supports_the_value_below_it():
+    assert in_picture(("DATE OF BIRTH", 100, 0), ("28 February 1979", 100, 16)) == [("DOB", "28 February 1979", "date_with_birth_keyword")]
+    # Not when the line above is far away, off to one side, or a sentence.
+    assert in_picture(("DATE OF BIRTH", 100, 0), ("28 February 1979", 100, 90)) == []
+    assert in_picture(("DATE OF BIRTH", 100, 0), ("28 February 1979", 400, 16)) == []
+    assert in_picture(("The date of birth of each member is recorded", 100, 0), ("28 February 1979", 100, 16)) == []
+    assert in_picture(("DOB 01/02/1980", 100, 0), ("Left 28/02/2026", 100, 16)) == [("DOB", "01/02/1980", "date_with_birth_keyword")]

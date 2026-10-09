@@ -88,30 +88,7 @@ def core_property_blocks(doc: Document) -> dict[str, Block]:
     }
 
 
-def common_words(doc: Document) -> frozenset[str]:
-    """Words this document writes in small letters, in text that can be relied on.
-
-    A word seen in small letters in the body of the document ("payment",
-    "access", "effective") is an ordinary word. Names are not written that
-    way. The list is taken from the document itself, so it needs no
-    dictionary and fits whatever the document is about. Words inside
-    pictures, hidden properties and words the OCR was unsure of are left out,
-    as is anything that is not a plain word (an e-mail address holds a name
-    in small letters).
-    """
-    words: set[str] = set()
-    for block in doc.blocks:
-        if block.container is Container.IMAGE or block.type is BlockType.METADATA or not block.text:
-            continue
-        if block.source is Source.OCR and block.words:
-            tokens = [block.text[w.start : w.end] for w in block.words if w.conf >= 0.8]
-        else:
-            tokens = block.text.split()
-        for token in tokens:
-            token = token.strip(".,;:!?()[]\"'“”‘’")
-            if len(token) > 1 and token.islower() and token.replace("-", "").isalpha():
-                words.update(part for part in token.split("-") if len(part) > 1)
-    return frozenset(words)
+common_words = allowlist.common_words  # the document's own ordinary words: see detect/allowlist.py
 
 
 _SHORT_CODE = re.compile(r"[\W_]*[A-Z]{2,5}[-./]?\d{1,4}[\W_]*")  # a reference such as a ticket or risk number

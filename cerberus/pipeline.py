@@ -110,9 +110,12 @@ def run(
             masked = mask(path, doc, tokenized, pending / "masked" / path.name, pictures=pictures)
             covered = office.picture_boxes(doc, tokenized, pictures)
             problems = verify.check_file(masked, tokenized, detect, doc, covered)
-            if problems and distrust_pictures(doc, problems):
+            for _ in range(_ROUNDS):
+                if not (problems and distrust_pictures(doc, problems)):
+                    break
                 # Something was still read in a picture masked word by word, or a scrap was left
-                # beside a mask: mask that picture whole and check again.
+                # beside a mask: mask that picture whole and check again. More than once if need
+                # be: with one picture gone, the detectors can read another differently.
                 masked = mask(path, doc, tokenized, pending / "masked" / path.name, pictures=pictures)
                 covered = office.picture_boxes(doc, tokenized, pictures)
                 problems = verify.check_file(masked, tokenized, detect, doc, covered)
@@ -123,7 +126,10 @@ def run(
 
     if result.problems:
         withhold()
-        report(False)  # the audit still needs to know what was found, and that nothing was released
+        try:
+            report(False)  # the audit still needs to know what was found, and that nothing was released
+        except OSError:
+            pass  # a report file open in another program must not hide what verification found
         verify.ensure_clean(result.problems)
 
     # Clear the way first. An earlier output left open in a viewer cannot be replaced,

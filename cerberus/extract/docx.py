@@ -212,6 +212,7 @@ class _Walker:
         # set), except in one-column or one-row tables, which are layout boxes.
         has_header = len(rows) > 1 and columns > 1
         headers: dict[int, str] = {}
+        merged: dict[int, str] = {}  # column -> the cell that is merged down into the rows below it
 
         for r, tr in enumerate(rows):
             col = _int(tr.find(f"{_w('trPr')}/{_w('gridBefore')}"), 0)
@@ -220,13 +221,17 @@ class _Walker:
                 span = _int(props.find(_w("gridSpan")), 1) if props is not None else 1
                 merge = props.find(_w("vMerge")) if props is not None else None
                 continues = merge is not None and merge.get(_VAL) in (None, "continue")
-                cell = self._cell(tc, table, r, col, headers.get(col) if r else None, continues)
+                cell = self._cell(tc, table, r, col, headers.get(col) if r else None, continues, merged.get(col))
                 if cell is not None and r == 0 and has_header:
                     for covered in range(col, col + span):
                         headers[covered] = cell.block_id
+                if merge is None:
+                    merged.pop(col, None)
+                elif not continues and cell is not None:
+                    merged[col] = cell.block_id
                 col += span
 
-    def _cell(self, tc, table, row, col, header_id, continues):
+    def _cell(self, tc, table, row, col, header_id, continues, merged_from=None):
         texts, indexes, extras_list, nested = [], [], [], []
         for element in _block_children(tc):
             if element.tag == _TBL:
@@ -237,10 +242,19 @@ class _Walker:
             if text.strip():
                 texts.append(text)
                 indexes.append(self.p_index[element])
-        # The lower cells of a vertical merge are empty stand-ins for the top one.
+        # The lower cells of a vertical merge are empty stand-ins for the top one. The text is
+        # not repeated (it would be found, tokenised and written back twice), but the cell is
+        # kept, pointing at the one it continues: without it the row has lost its first cell,
+        # and a row of a table read without its label is a different row.
         attached = any(any(extras.values()) for extras, _ in extras_list)
         if continues and not texts and not nested and not attached:
-            return None
+            if merged_from is None:
+                return None
+            return self.doc.add(
+                BlockType.TABLE_CELL, "", container=Container.TABLE, parent_id=table.block_id,
+                section_path=table.section_path, row=row, col=col, header_id=header_id,
+                native_ref={"part": self.name, "p": [], "merged_from": merged_from},
+            )
         cell = self.doc.add(
             BlockType.TABLE_CELL,
             "\n".join(texts),
